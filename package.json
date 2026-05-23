@@ -1,0 +1,63 @@
+{
+  "name": "tb-to-tutorial-converter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Convert textbook PDFs into chunk-streamed tutorials with quizzes + SRS flashcards.",
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "db:seed": "tsx src/db/seed.ts",
+    "test": "vitest run",
+    "test:phase0": "bash scripts/phase0-gate.sh"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.621.0",
+    "@aws-sdk/s3-request-presigner": "3.621.0",
+    "better-sqlite3": "11.1.2",
+    "class-variance-authority": "0.7.0",
+    "clsx": "2.1.1",
+    "dompurify": "3.1.6",
+    "drizzle-orm": "0.32.1",
+    "isomorphic-dompurify": "2.14.0",
+    "lucide-react": "0.408.0",
+    "next": "14.2.5",
+    "openai": "4.55.0",
+    "pdfjs-dist": "4.5.136",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-markdown": "9.0.1",
+    "tailwind-merge": "2.4.0",
+    "tiktoken": "1.0.15",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.11",
+    "@types/dompurify": "3.0.5",
+    "@types/node": "20.14.12",
+    "@types/react": "18.3.3",
+    "@types/react-dom": "18.3.0",
+    "autoprefixer": "10.4.19",
+    "drizzle-kit": "0.23.0",
+    "eslint": "8.57.0",
+    "eslint-config-next": "14.2.5",
+    "fast-check": "3.21.0",
+    "postcss": "8.4.40",
+    "tailwindcss": "3.4.7",
+    "tsx": "4.16.2",
+    "typescript": "5.5.4",
+    "vitest": "2.0.4",
+    "@testing-library/react": "16.0.1",
+    "@testing-library/dom": "10.4.0",
+    "@testing-library/jest-dom": "6.4.8",
+    "@vitejs/plugin-react": "4.3.1",
+    "jsdom": "25.0.0"
+  }
+}

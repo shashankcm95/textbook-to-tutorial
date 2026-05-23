@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tb-to-tutorial",
+      "runtimeExecutable": "/Users/shashankchandrashekarmurigappa/Documents/TB_to_Tutorial_converter/node_modules/.bin/next",
+      "runtimeArgs": ["dev"],
+      "cwd": "/Users/shashankchandrashekarmurigappa/Documents/TB_to_Tutorial_converter",
+      "port": 3000
+    }
+  ]
+}
