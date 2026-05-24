@@ -35,9 +35,11 @@ import {
   flashcards as flashcardsTable,
   parsesCost,
   tutorials,
+  chapterFidelityScores,
 } from '@/db/schema';
 import { generateNarrativeOnly } from '@/lib/openai/narrative-only';
 import { generateQuizFromNarrative } from '@/lib/openai/quiz-from-narrative';
+import { scoreFidelity } from '@/lib/openai/fidelity-check';
 import { readChunk, resolveChunksBucket } from '@/lib/s3-chunks';
 import type { SourceParagraph } from '@/lib/types';
 
@@ -229,6 +231,47 @@ export async function generateChapter(
       .run();
   });
 
+  // ── 7. Score narrative-vs-source fidelity (DRIFT-test3-022) ──────────
+  // Run a separate 4o-mini call to count preserved concrete anchors. Fail-
+  // open: if the scorer errors, we proceed without a score (the chapter is
+  // already persisted as complete/partial; absent score = "unknown
+  // fidelity" rather than blocking the read path).
+  let fidelityCostUsd = 0;
+  try {
+    const fidelity = await scoreFidelity({
+      chapterTitle: chapter.title,
+      narrative: narrativeResult.narrative,
+      sourceParagraphs,
+      abortSignal,
+    });
+    fidelityCostUsd = fidelity.costUsd;
+    db.transaction((tx) => {
+      tx.insert(chapterFidelityScores)
+        .values({
+          id: crypto.randomUUID(),
+          chapterId: chapter.id,
+          specificNumbersPreserved: fidelity.specificNumbersPreserved,
+          namedExamplesPreserved: fidelity.namedExamplesPreserved,
+          terminologicalContrastsPreserved: fidelity.terminologicalContrastsPreserved,
+          specificNumbersMissing: fidelity.specificNumbersMissing,
+          namedExamplesMissing: fidelity.namedExamplesMissing,
+          terminologicalContrastsMissing: fidelity.terminologicalContrastsMissing,
+          overallScore: fidelity.overallScore,
+          notesJson: JSON.stringify(fidelity.notes),
+          model: fidelity.model,
+          promptTokens: fidelity.promptTokens,
+          completionTokens: fidelity.completionTokens,
+          costUsd: fidelity.costUsd,
+        })
+        .run();
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[per-chapter] fidelity scoring failed for ${chapter.id}: ${(err as Error).message}`,
+    );
+  }
+
   onChapterComplete?.();
   return {
     chapterId: chapter.id,
@@ -236,7 +279,7 @@ export async function generateChapter(
     questionsCount: quizResult.questions.length,
     flashcardsCount: quizResult.flashcards.length,
     validationDropCount: quizResult.validationDropCount,
-    totalCostUsd: narrativeResult.costUsd + quizResult.costUsd,
+    totalCostUsd: narrativeResult.costUsd + quizResult.costUsd + fidelityCostUsd,
     status: finalStatus,
   };
 }

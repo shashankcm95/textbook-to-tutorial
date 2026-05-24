@@ -384,6 +384,46 @@ export type SkippedSection = typeof skippedSections.$inferSelect;
 export type NewSkippedSection = typeof skippedSections.$inferInsert;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// chapter_fidelity_scores — narrative-vs-source preservation audit (DRIFT-022)
+//
+// After narrative generation, a 4o-mini scorer counts how many load-bearing
+// concrete anchors from the source (numbers, named examples, terminological
+// contrasts) survived into the generated narrative. The composite score
+// (0-100) gives an objective signal of how faithful each chapter is — useful
+// for catching regressions when the narrative prompt changes.
+// ─────────────────────────────────────────────────────────────────────────────
+export const chapterFidelityScores = sqliteTable(
+  'chapter_fidelity_scores',
+  {
+    id: text('id').primaryKey(),
+    chapterId: text('chapter_id')
+      .notNull()
+      .references(() => chapters.id, { onDelete: 'cascade' }),
+    specificNumbersPreserved: integer('specific_numbers_preserved').notNull().default(0),
+    namedExamplesPreserved: integer('named_examples_preserved').notNull().default(0),
+    terminologicalContrastsPreserved: integer('terminological_contrasts_preserved').notNull().default(0),
+    specificNumbersMissing: integer('specific_numbers_missing').notNull().default(0),
+    namedExamplesMissing: integer('named_examples_missing').notNull().default(0),
+    terminologicalContrastsMissing: integer('terminological_contrasts_missing').notNull().default(0),
+    overallScore: integer('overall_score').notNull(),
+    notesJson: text('notes_json').notNull().default('[]'),
+    model: text('model').notNull(),
+    promptTokens: integer('prompt_tokens').notNull(),
+    completionTokens: integer('completion_tokens').notNull(),
+    costUsd: real('cost_usd').notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    byChapterRecent: index('idx_fidelity_chapter_recent').on(t.chapterId, t.createdAt),
+  }),
+);
+
+export type ChapterFidelityScore = typeof chapterFidelityScores.$inferSelect;
+export type NewChapterFidelityScore = typeof chapterFidelityScores.$inferInsert;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Re-export aggregate — convenience for `import * as schema from './schema'`
 // (drizzle migrator requires the schema namespace at runtime).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -397,4 +437,5 @@ export const schema = {
   parsesCost,
   glossaryTerms,
   skippedSections,
+  chapterFidelityScores,
 };
