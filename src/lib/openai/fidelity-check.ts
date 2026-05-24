@@ -42,6 +42,13 @@ Score 0-100 = (preserved_count / total_count) * 100, weighted by category:
 
 If a category has zero source items, distribute its weight proportionally to the others.
 
+EDGE CASE — NO ANCHORS IN SOURCE (DRIFT-test3-026):
+If you identify ZERO items across ALL three categories combined (i.e., the source contains no concrete anchors, no named examples, AND no terminological contrasts — common for summary chapters, prefaces, introductions that only forward-reference later material), you MUST:
+  - set overall_score to 100 (N/A — nothing to lose, so nothing was lost)
+  - make the FIRST entry in "notes" exactly the string "NO_ANCHORS_IN_SOURCE" (uppercase, underscore-separated)
+  - optionally include 1-2 follow-up notes describing the chapter's nature ("preface forwards to later chapters", etc.)
+The downstream UI uses notes[0] === "NO_ANCHORS_IN_SOURCE" as the N/A sentinel; do NOT use any other phrasing for that first note.
+
 Output strict JSON:
 {
   "specific_numbers_preserved": <int>,
