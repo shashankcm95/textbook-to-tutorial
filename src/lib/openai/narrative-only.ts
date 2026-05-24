@@ -26,6 +26,8 @@ import {
   NARRATIVE_ONLY_RESPONSE_FORMAT,
 } from '@/lib/prompts/narrative-only';
 import type { SourceParagraph } from '@/lib/types';
+import type { VoiceProfile } from '@/lib/ingest/voice-extract';
+import type { AnchorWhitelistEntry } from './anchor-validator';
 
 const MODEL = 'gpt-4o';
 const MAX_COMPLETION_TOKENS = 3500;
@@ -36,6 +38,18 @@ export interface NarrativeOnlyArgs {
   abortSignal?: AbortSignal;
   /** Fires per streaming token delta; caller bridges to SSE 'token' event. */
   onToken: (delta: string) => void;
+  /**
+   * Feature B' Wave 2 — optional author voice profile to prepend to the
+   * system prompt. No-op when absent (graceful degradation for tutorials
+   * generated before the voice-extract pipeline existed).
+   */
+  voiceProfile?: VoiceProfile;
+  /**
+   * Feature B' Wave 2 — optional named-anchor whitelist to prepend to the
+   * system prompt. No-op when absent or empty (the source-grounding pass
+   * found no load-bearing anchors for this chunk).
+   */
+  anchorWhitelist?: AnchorWhitelistEntry[];
 }
 
 export interface NarrativeOnlyResult {
@@ -56,10 +70,17 @@ export class NarrativeParseError extends Error {
 export async function generateNarrativeOnly(
   args: NarrativeOnlyArgs,
 ): Promise<NarrativeOnlyResult> {
-  const { chapterTitle, sourceParagraphs, abortSignal, onToken } = args;
+  const {
+    chapterTitle,
+    sourceParagraphs,
+    abortSignal,
+    onToken,
+    voiceProfile,
+    anchorWhitelist,
+  } = args;
   if (!isSupportedModel(MODEL)) throw new UnknownModelError(MODEL);
 
-  const systemPrompt = buildNarrativeOnlySystemPrompt();
+  const systemPrompt = buildNarrativeOnlySystemPrompt({ voiceProfile, anchorWhitelist });
   const userPrompt = buildNarrativeOnlyUserPrompt({ chapterTitle, sourceParagraphs });
 
   // DRIFT-test3-032: wrap in shared retry policy. Without this, a single 429
