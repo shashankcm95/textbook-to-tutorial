@@ -48,7 +48,7 @@ import { useRouter } from 'next/navigation';
 import type { Chapter } from '@/db/schema';
 import type { SourceParagraph, QuizQuestion, LLMFlashcard } from '@/lib/types';
 import { useStreamingChapter, type StreamFrame } from '@/hooks/useStreamingChapter';
-import { ChapterRenderer } from '@/components/ChapterRenderer';
+import { ChapterLessons } from '@/components/ChapterLessons';
 import { CostChip } from '@/components/CostChip';
 import { CompletionTracker } from '@/components/CompletionTracker';
 import { FlashcardReviewer, type ReviewableCard } from '@/components/FlashcardReviewer';
@@ -568,33 +568,42 @@ export function StreamingClient(props: StreamingClientProps) {
                   {c.status === 'streaming' ? (
                     <StreamingProgressIndicator receivedChars={c.narrative.length} />
                   ) : c.parsedNarrative !== undefined ? (
-                    <>
-                      <ChapterRenderer
-                        narrative={c.parsedNarrative}
-                        sourceParagraphs={c.sourceParagraphs}
-                      />
-                      {c.parsedQuestions && c.parsedQuestions.length > 0 ? (
-                        <QuizQuestions
-                          questions={c.parsedQuestions}
-                          sourceParagraphs={c.sourceParagraphs}
-                        />
-                      ) : null}
-                      {c.parsedFlashcards && c.parsedFlashcards.length > 0 ? (
-                        <ChapterFlashcards flashcards={c.parsedFlashcards} />
-                      ) : null}
-                      {canMarkComplete ? (
-                        <MarkCompleteButton
-                          tutorialId={tutorialId}
-                          chapterOrdinal={c.ordinal}
-                          csrfToken={csrfToken}
-                          onSuccess={() => router.refresh()}
-                        />
-                      ) : alreadyMarkedComplete ? (
-                        <p className="mt-4 inline-flex items-center gap-1 rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">
-                          ✓ Chapter complete
-                        </p>
-                      ) : null}
-                    </>
+                    // Feature A — multipage chapters. ChapterLessons parses
+                    // the narrative into lessons and renders one at a time.
+                    // The quiz / flashcards / Mark Complete are passed as a
+                    // render-prop and only appear on the LAST lesson (or
+                    // immediately, for pre-Feature-A chapters with no
+                    // lesson markers — graceful degradation via single-
+                    // lesson fallback in parseLessons).
+                    <ChapterLessons
+                      narrative={c.parsedNarrative}
+                      sourceParagraphs={c.sourceParagraphs}
+                      renderLastLessonExtras={() => (
+                        <>
+                          {c.parsedQuestions && c.parsedQuestions.length > 0 ? (
+                            <QuizQuestions
+                              questions={c.parsedQuestions}
+                              sourceParagraphs={c.sourceParagraphs}
+                            />
+                          ) : null}
+                          {c.parsedFlashcards && c.parsedFlashcards.length > 0 ? (
+                            <ChapterFlashcards flashcards={c.parsedFlashcards} />
+                          ) : null}
+                          {canMarkComplete ? (
+                            <MarkCompleteButton
+                              tutorialId={tutorialId}
+                              chapterOrdinal={c.ordinal}
+                              csrfToken={csrfToken}
+                              onSuccess={() => router.refresh()}
+                            />
+                          ) : alreadyMarkedComplete ? (
+                            <p className="mt-4 inline-flex items-center gap-1 rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">
+                              ✓ Chapter complete
+                            </p>
+                          ) : null}
+                        </>
+                      )}
+                    />
                   ) : c.status === 'failed' ? (
                     <p className="rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
                       This chapter failed to generate. Retry the tutorial to regenerate.
