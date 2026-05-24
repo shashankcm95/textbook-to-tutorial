@@ -58,6 +58,7 @@ import {
 } from '@/lib/session';
 import { StreamingClient } from './StreamingClient';
 import type { ReviewableCard } from '@/components/FlashcardReviewer';
+import type { QuizQuestion, LLMFlashcard } from '@/lib/types';
 
 // Force dynamic rendering — this page is per-user; static caching would be
 // catastrophic (one user could see another's tutorial). Setting at the file
@@ -130,6 +131,82 @@ export default async function TutorialPage({ params }: TutorialPageProps) {
     .where(eq(schema.chapters.tutorialId, tutorialId))
     .orderBy(asc(schema.chapters.ordinal));
 
+  // ── 5.b. Load per-chapter questions + flashcards (UX persona Sprint A,
+  //         finding T1.1). The previous implementation never hydrated these
+  //         from DB on revisit — `parsedQuestions` only got populated mid-
+  //         stream, so a returning user would see narrative but no quiz, and
+  //         could press "Mark complete & unlock next" without ever attempting
+  //         the gate. Loading them here closes the loop. Single chapter-join
+  //         for both (the DB is sub-100KB; one extra scan).
+  const chapterIds = initialChapters.map((c) => c.id);
+  const allQuestionsRows = chapterIds.length === 0
+    ? []
+    : await db
+        .select()
+        .from(schema.questions)
+        .innerJoin(
+          schema.chapters,
+          eq(schema.chapters.id, schema.questions.chapterId),
+        )
+        .where(eq(schema.chapters.tutorialId, tutorialId));
+  const allChapterFlashcardsRows = chapterIds.length === 0
+    ? []
+    : await db
+        .select({
+          id: schema.flashcards.id,
+          chapterId: schema.flashcards.chapterId,
+          front: schema.flashcards.front,
+          back: schema.flashcards.back,
+          sourceParagraphRef: schema.flashcards.sourceParagraphRef,
+        })
+        .from(schema.flashcards)
+        .innerJoin(
+          schema.chapters,
+          eq(schema.chapters.id, schema.flashcards.chapterId),
+        )
+        .where(eq(schema.chapters.tutorialId, tutorialId));
+
+  // Group by chapterId. Parse `options_json` into the tuple shape the UI
+  // expects. Reshape DB rows into the in-memory LLMFlashcard / QuizQuestion
+  // contracts (camelCase + tuple-typed options).
+  const initialQuestionsByChapter: Record<string, QuizQuestion[]> = {};
+  for (const row of allQuestionsRows) {
+    const q = row.questions;
+    let parsedOptions: unknown;
+    try {
+      parsedOptions = JSON.parse(q.optionsJson);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(parsedOptions) || parsedOptions.length !== 4) continue;
+    if (!parsedOptions.every((o) => typeof o === 'string')) continue;
+    const correctIdx = q.correctIndex;
+    if (correctIdx !== 0 && correctIdx !== 1 && correctIdx !== 2 && correctIdx !== 3) continue;
+    const ref = q.sourceParagraphRef;
+    if (!/^page\d+:paragraph\d+$/.test(ref)) continue;
+    const list = initialQuestionsByChapter[q.chapterId] ?? [];
+    list.push({
+      prompt: q.prompt,
+      options: parsedOptions as [string, string, string, string],
+      correctIndex: correctIdx,
+      explanation: q.explanation,
+      sourceParagraphRef: ref as QuizQuestion['sourceParagraphRef'],
+    });
+    initialQuestionsByChapter[q.chapterId] = list;
+  }
+  const initialFlashcardsByChapter: Record<string, LLMFlashcard[]> = {};
+  for (const f of allChapterFlashcardsRows) {
+    const list = initialFlashcardsByChapter[f.chapterId] ?? [];
+    const ref = f.sourceParagraphRef;
+    if (!/^page\d+:paragraph\d+$/.test(ref)) continue;
+    list.push({
+      front: f.front,
+      back: f.back,
+      sourceParagraphRef: ref as LLMFlashcard['sourceParagraphRef'],
+    });
+    initialFlashcardsByChapter[f.chapterId] = list;
+  }
+
   // ── 6. Load due flashcards (for FlashcardReviewer) ──────────────────────
   // Surface only cards whose dueAt is in the past OR whose review row doesn't
   // exist yet (new cards). To keep the projection simple, we issue two reads:
@@ -184,6 +261,8 @@ export default async function TutorialPage({ params }: TutorialPageProps) {
       tutorialId={tutorialId}
       initialChapters={initialChapters}
       initialReviewCards={initialReviewCards}
+      initialQuestionsByChapter={initialQuestionsByChapter}
+      initialFlashcardsByChapter={initialFlashcardsByChapter}
       csrfToken={csrfToken}
       maxUnlockedChapterIdx={tutorial.maxUnlockedChapterIdx}
     />

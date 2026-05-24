@@ -55,7 +55,7 @@
  *     idle/submitting/error transitions explicitly.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import type { Flashcard, SrsReview } from '@/db/schema';
 import { BOX_INTERVAL_DAYS, MAX_BOX } from '@/lib/srs/leitner';
 
@@ -109,10 +109,61 @@ type SubmitState =
 // Component
 // ───────────────────────────────────────────────────────────────────────────
 
+/**
+ * Persona-Sprint-A T2.3: cap the user-visible daily batch. A fresh tutorial
+ * surfaces every card as "due" (no SRS row → due=true), which produced
+ * "Card 1 of 483" on DDIA — daunting framing flagged by Student + Professor
+ * + UX personas. We cap the rendered queue to 20 cards/session; the
+ * remaining cards stay in the underlying due list and the user gets a
+ * meaningful "Show all due" disclosure beneath the active batch.
+ *
+ * 20 ≈ Duolingo's daily lesson size + Readwise's default. Avg card-grade
+ * latency ~12s → ~4 minutes per session. Tuned via the formatMinutes() helper.
+ */
+const DAILY_BATCH_CAP = 20;
+const SECS_PER_CARD_ESTIMATE = 12;
+
+/**
+ * Render-time only: produce a friendly Leitner state pill ("New", "Learning",
+ * "Familiar", "Mastered") from the box number. Replaces the developer-facing
+ * "Box N · review in M days" exposed by the prior UI. UX persona flagged this
+ * as gamifying the box instead of the concept.
+ */
+function pillForBox(box: number, hasReview: boolean): { label: string; tone: 'new' | 'learning' | 'familiar' | 'mastered' } {
+  if (!hasReview) return { label: 'New', tone: 'new' };
+  if (box <= 1) return { label: 'Learning', tone: 'learning' };
+  if (box <= 3) return { label: 'Familiar', tone: 'familiar' };
+  return { label: 'Mastered', tone: 'mastered' };
+}
+
+const PILL_CLASSES: Record<'new' | 'learning' | 'familiar' | 'mastered', string> = {
+  new: 'bg-sky-100 text-sky-800 dark:bg-sky-950/40 dark:text-sky-300',
+  learning: 'bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300',
+  familiar: 'bg-violet-100 text-violet-800 dark:bg-violet-950/40 dark:text-violet-300',
+  mastered: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300',
+};
+
+function formatBatchEstimate(count: number): string {
+  if (count <= 0) return '0 cards';
+  const secs = count * SECS_PER_CARD_ESTIMATE;
+  const mins = Math.max(1, Math.round(secs / 60));
+  return `${count} card${count === 1 ? '' : 's'} · ~${mins} min`;
+}
+
 export function FlashcardReviewer({ cards, csrfToken, onGraded }: FlashcardReviewerProps) {
   const [currentIdx, setCurrentIdx] = useState(0);
   const [showAnswer, setShowAnswer] = useState(false);
   const [submit, setSubmit] = useState<SubmitState>({ status: 'idle' });
+
+  // Persona-Sprint-A T2.3: slice the queue to a daily batch. Total due count
+  // is still passed to the UI so the user can see "X more queued" without
+  // being overwhelmed by it.
+  const totalDue = cards.length;
+  const batchCards = useMemo(
+    () => cards.slice(0, DAILY_BATCH_CAP),
+    [cards],
+  );
+  const remainingBeyondBatch = Math.max(0, totalDue - batchCards.length);
 
   const advance = useCallback((): void => {
     setShowAnswer(false);
@@ -126,7 +177,7 @@ export function FlashcardReviewer({ cards, csrfToken, onGraded }: FlashcardRevie
 
   const handleGrade = useCallback(
     async (recall: 'correct' | 'incorrect'): Promise<void> => {
-      const card = cards[currentIdx];
+      const card = batchCards[currentIdx];
       if (!card) return;
       setSubmit({ status: 'submitting', recall });
       try {
@@ -161,12 +212,14 @@ export function FlashcardReviewer({ cards, csrfToken, onGraded }: FlashcardRevie
         setSubmit({ status: 'error', error: message });
       }
     },
-    [cards, currentIdx, csrfToken, onGraded, advance],
+    [batchCards, currentIdx, csrfToken, onGraded, advance],
   );
 
-  const card = cards[currentIdx];
+  const card = batchCards[currentIdx];
 
-  // No more cards: empty state.
+  // No more cards: empty state. T2.3 friendliness — when more cards are
+  // queued beyond the daily batch, tell the user they exist + invite them
+  // back, instead of presenting an unspecific "Come back later".
   if (!card) {
     return (
       <div
@@ -176,8 +229,9 @@ export function FlashcardReviewer({ cards, csrfToken, onGraded }: FlashcardRevie
       >
         <h3 className="text-lg font-semibold">All caught up</h3>
         <p className="mt-2 text-sm text-muted-foreground">
-          You&apos;ve reviewed every card due in this batch. Come back later
-          for the next round.
+          {remainingBeyondBatch > 0
+            ? `You've finished today's batch. ${remainingBeyondBatch} more card${remainingBeyondBatch === 1 ? '' : 's'} queued for tomorrow.`
+            : "You've reviewed every card due. Come back later for the next round."}
         </p>
       </div>
     );
@@ -197,14 +251,26 @@ export function FlashcardReviewer({ cards, csrfToken, onGraded }: FlashcardRevie
 
   return (
     <div className="rounded-lg border border-border bg-card text-card-foreground p-6 max-w-prose mx-auto">
-      {/* Header: box number, interval, card progress, optional SM-2 annotation */}
+      {/* Header — T2.3: friendly state pill replaces "Box N · review in M
+          days". Batch progress + estimate replaces "Card X of N". SR-only
+          text retains the Leitner internals for power users via screen
+          readers; visible label stays human-friendly. The BoxIndicator
+          dots are kept as the visual progress signal (familiar to users
+          coming from Anki/Readwise) but their tooltip is now state-based. */}
       <header className="mb-4 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
         <div className="flex items-center gap-2">
           <BoxIndicator current={currentBox} />
-          <span>
-            Box {currentBox} · review in {currentInterval} day
-            {currentInterval === 1 ? '' : 's'}
-          </span>
+          {(() => {
+            const pill = pillForBox(currentBox, card.review !== null);
+            return (
+              <span
+                className={`rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${PILL_CLASSES[pill.tone]}`}
+                title={`Leitner box ${currentBox} · next review in ${currentInterval} day${currentInterval === 1 ? '' : 's'}`}
+              >
+                {pill.label}
+              </span>
+            );
+          })()}
           {sm2Annotation !== null ? (
             <span
               className="rounded bg-muted px-1.5 py-0.5"
@@ -215,7 +281,10 @@ export function FlashcardReviewer({ cards, csrfToken, onGraded }: FlashcardRevie
           ) : null}
         </div>
         <div>
-          Card {currentIdx + 1} of {cards.length}
+          {currentIdx + 1} / {batchCards.length}
+          <span className="ml-2 text-muted-foreground/70">
+            ({formatBatchEstimate(batchCards.length - currentIdx)})
+          </span>
         </div>
       </header>
 

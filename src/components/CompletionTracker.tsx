@@ -61,7 +61,7 @@
  *     keying matters once filter/sort lands.
  */
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import type { Chapter } from '@/db/schema';
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -158,7 +158,18 @@ export function CompletionTracker({ chapters }: CompletionTrackerProps) {
     [signals],
   );
 
+  // Persona-Sprint-A T2.2 fix: collapse the per-chapter list by default.
+  // The previous render produced a 124-row × 4-dash grid that was visually
+  // overwhelming on long books like DDIA (UX persona flagged HIGH; Student
+  // flagged "demoralizing"). We preserve the riley HIGH-2/HIGH-3 multi-
+  // signal model, but surface a 1-line summary by default + a disclosure
+  // for the full list.
+  const [expanded, setExpanded] = useState(false);
+
   const completedCount = signals.filter((s) => s.allComplete).length;
+  const readCount = signals.filter((s) => s.read).length;
+  const quizzedCount = signals.filter((s) => s.quizzed).length;
+  const masteredCount = signals.filter((s) => s.mastered).length;
   const tutorialPctRounded = Math.round(tutorialPct * 100);
 
   return (
@@ -182,7 +193,7 @@ export function CompletionTracker({ chapters }: CompletionTrackerProps) {
         aria-valuemin={0}
         aria-valuemax={100}
         aria-label={`Tutorial completion: ${tutorialPctRounded} percent`}
-        className="mb-4 h-2 w-full overflow-hidden rounded-full bg-muted"
+        className="mb-3 h-2 w-full overflow-hidden rounded-full bg-muted"
       >
         <div
           className="h-full bg-primary transition-all"
@@ -190,32 +201,62 @@ export function CompletionTracker({ chapters }: CompletionTrackerProps) {
         />
       </div>
 
-      {/* Per-chapter checklist */}
+      {/* T2.2: 1-line summary — surfaces the riley HIGH-2 multi-signal model
+          without the 124-row grid noise. */}
       {signals.length === 0 ? (
         <p className="text-sm italic text-muted-foreground">
           No chapters yet — the tutorial is still generating.
         </p>
       ) : (
-        <ul className="space-y-2">
-          {signals.map((s) => (
-            <li
-              key={s.chapterId}
-              className="flex items-center justify-between gap-3 rounded border border-border/50 bg-background px-3 py-2"
-            >
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium">
-                  {s.ordinal + 1}. {s.title}
-                </div>
-              </div>
-              <div className="flex shrink-0 items-center gap-1.5" role="group" aria-label={`Signals for ${s.title}`}>
-                <SignalBadge label="Read" on={s.read} />
-                <SignalBadge label="Scrolled" on={s.scrolled} />
-                <SignalBadge label="Quizzed" on={s.quizzed} />
-                <SignalBadge label="Mastered" on={s.mastered} />
-              </div>
-            </li>
-          ))}
-        </ul>
+        <>
+          <p className="text-xs text-muted-foreground tabular-nums">
+            <span className="font-medium text-foreground">{readCount}</span> read
+            <span aria-hidden="true"> · </span>
+            <span className="font-medium text-foreground">{quizzedCount}</span> quizzed
+            <span aria-hidden="true"> · </span>
+            <span className="font-medium text-foreground">{masteredCount}</span> mastered
+            <span aria-hidden="true"> · </span>
+            <span>{signals.length} total</span>
+          </p>
+
+          {/* Collapsible per-chapter detail — preserves the riley HIGH-3
+              "surface all 4 signals" requirement on demand without leaking
+              a wall of dashes onto every page-load. */}
+          <button
+            type="button"
+            onClick={() => setExpanded((e) => !e)}
+            aria-expanded={expanded}
+            aria-controls="completion-detail-list"
+            className="mt-3 text-xs font-medium text-primary hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring rounded"
+          >
+            {expanded
+              ? `Hide per-chapter signals`
+              : `Show per-chapter signals (${signals.length} chapters) →`}
+          </button>
+
+          {expanded ? (
+            <ul id="completion-detail-list" className="mt-3 space-y-2">
+              {signals.map((s) => (
+                <li
+                  key={s.chapterId}
+                  className="flex items-center justify-between gap-3 rounded border border-border/50 bg-background px-3 py-2"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium">
+                      {s.ordinal + 1}. {s.title}
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5" role="group" aria-label={`Signals for ${s.title}`}>
+                    <SignalBadge label="Read" on={s.read} />
+                    <SignalBadge label="Scrolled" on={s.scrolled} />
+                    <SignalBadge label="Quizzed" on={s.quizzed} />
+                    <SignalBadge label="Mastered" on={s.mastered} />
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </>
       )}
     </section>
   );

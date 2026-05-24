@@ -63,6 +63,23 @@ export interface StreamingClientProps {
   initialChapters: Chapter[];
   /** Initial reviewable cards (joined flashcards + srs_reviews); may be empty. */
   initialReviewCards: ReviewableCard[];
+  /**
+   * Quiz questions per chapter, loaded from DB at SSR time. Persona-Sprint-A
+   * fix (T1.1): without this, a returning user never saw the quiz that was
+   * generated mid-stream — `parsedQuestions` only got populated from the live
+   * stream, never from DB. Now the page-server hydrates these and the client
+   * uses them to seed `ChapterStreamState.parsedQuestions`.
+   *
+   * Keyed by chapter.id. Empty for chapters that haven't been generated yet.
+   */
+  initialQuestionsByChapter?: Record<string, QuizQuestion[]>;
+  /**
+   * Flashcards per chapter, loaded from DB at SSR time. Mirror of
+   * `initialQuestionsByChapter` for the per-chapter flashcards inline
+   * surface (the FlashcardReviewer's `initialReviewCards` is a separate
+   * "due today" stream and remains its own panel).
+   */
+  initialFlashcardsByChapter?: Record<string, LLMFlashcard[]>;
   /** CSRF token read from cookie server-side; safe to pass to client island. */
   csrfToken: string;
   /**
@@ -223,7 +240,11 @@ function parseErrorPayload(data: unknown): ErrorPayload | null {
 // Convert an initial Chapter row into the streaming state shape
 // ───────────────────────────────────────────────────────────────────────────
 
-function chapterRowToStreamState(c: Chapter): ChapterStreamState {
+function chapterRowToStreamState(
+  c: Chapter,
+  hydratedQuestions?: QuizQuestion[],
+  hydratedFlashcards?: LLMFlashcard[],
+): ChapterStreamState {
   // source_paragraphs_json is a JSON-stringified SourceParagraph[]; parse
   // defensively. On parse failure, empty array = citations won't resolve
   // (CitationModal shows the "not found" empty state).
@@ -236,20 +257,28 @@ function chapterRowToStreamState(c: Chapter): ChapterStreamState {
   }
   // For SSR-hydrated rows that are already complete, the worker persists the
   // narrative-only markdown (NOT the full JSON), and questions/flashcards
-  // land in their own tables. So on hydration: treat the persisted narrative
-  // string as the parsed markdown directly; questions + flashcards will be
-  // empty (loaded separately by future iteration). FINDING-RENDER-1 fix.
+  // land in their own tables. The parent page.tsx (post-T1.1) loads them
+  // and hands them in via `hydratedQuestions` / `hydratedFlashcards`.
+  //
+  // Fallback chain for questions/flashcards:
+  //   1. hydrated* (from DB-load at SSR) — the new path
+  //   2. parseStructuredChapter(raw) — legacy path for rows where the
+  //      worker stashed the full JSON under chapter.narrative
+  //   3. undefined — fresh chapter, nothing to render yet
   const raw = c.narrative ?? '';
-  // Defensive: if a prior buggy worker run persisted raw JSON, recover by
-  // parsing — keeps old rows readable after the fix.
   const parsedFromJson = c.status === 'complete' ? parseStructuredChapter(raw) : null;
-  // 'partial' status means narrative is present but some questions/flashcards
-  // were dropped during source_paragraph_ref validation. From the reader's
-  // perspective it's still complete content; surface it the same way.
   const isReadable = c.status === 'complete' || c.status === 'partial';
   const parsedNarrative =
     parsedFromJson?.narrative ??
     (isReadable ? raw : undefined);
+  const questions =
+    hydratedQuestions && hydratedQuestions.length > 0
+      ? hydratedQuestions
+      : parsedFromJson?.questions;
+  const flashcards =
+    hydratedFlashcards && hydratedFlashcards.length > 0
+      ? hydratedFlashcards
+      : parsedFromJson?.flashcards;
   return {
     id: c.id,
     ordinal: c.ordinal,
@@ -258,8 +287,8 @@ function chapterRowToStreamState(c: Chapter): ChapterStreamState {
     status: isReadable ? 'complete' : c.status === 'failed' ? 'failed' : 'streaming',
     sourceParagraphs: sp,
     parsedNarrative,
-    parsedQuestions: parsedFromJson?.questions,
-    parsedFlashcards: parsedFromJson?.flashcards,
+    parsedQuestions: questions,
+    parsedFlashcards: flashcards,
   };
 }
 
@@ -268,19 +297,61 @@ function chapterRowToStreamState(c: Chapter): ChapterStreamState {
 // ───────────────────────────────────────────────────────────────────────────
 
 export function StreamingClient(props: StreamingClientProps) {
-  const { tutorialId, initialChapters, initialReviewCards, csrfToken, maxUnlockedChapterIdx } = props;
+  const {
+    tutorialId,
+    initialChapters,
+    initialReviewCards,
+    initialQuestionsByChapter,
+    initialFlashcardsByChapter,
+    csrfToken,
+    maxUnlockedChapterIdx,
+  } = props;
   const router = useRouter();
 
   // Map<chapterId, ChapterStreamState> — seeded from SSR.
+  // Persona-Sprint-A T1.1 fix: questions + flashcards now come in via
+  // initialQuestionsByChapter / initialFlashcardsByChapter (loaded from
+  // DB by page.tsx). Without this, a returning user never saw the quiz
+  // that was generated during the prior live stream.
   const [chapterMap, setChapterMap] = useState<Map<string, ChapterStreamState>>(() => {
     const m = new Map<string, ChapterStreamState>();
-    for (const c of initialChapters) m.set(c.id, chapterRowToStreamState(c));
+    for (const c of initialChapters) {
+      m.set(
+        c.id,
+        chapterRowToStreamState(
+          c,
+          initialQuestionsByChapter?.[c.id],
+          initialFlashcardsByChapter?.[c.id],
+        ),
+      );
+    }
     return m;
   });
   const [costUsdLive, setCostUsdLive] = useState<number | undefined>(undefined);
   const [protocolError, setProtocolError] = useState<{ code: string; message?: string } | null>(
     null,
   );
+
+  // Persona-Sprint-A T2.6: quiz-attempt tracking. Keyed by chapterId; true
+  // means the user has clicked "Check answers" at least once for that
+  // chapter's quiz. Gates the Mark Complete button.
+  //
+  // Why client-only (not persisted to DB): the server already enforces
+  // chapter completion semantics via release-policy.ts when the user
+  // actually clicks Mark Complete. Persisting attempt-state is Sprint B
+  // (last_quiz_attempt_at is already in the schema; wiring it through
+  // the per-attempt POST is a separate change).
+  const [quizAttemptedByChapter, setQuizAttemptedByChapter] = useState<Map<string, boolean>>(
+    () => new Map(),
+  );
+  const markQuizAttempted = useCallback((chapterId: string) => {
+    setQuizAttemptedByChapter((prev) => {
+      if (prev.get(chapterId) === true) return prev;
+      const next = new Map(prev);
+      next.set(chapterId, true);
+      return next;
+    });
+  }, []);
 
   /**
    * Stable frame handler — passed to useStreamingChapter. Memoized to avoid
@@ -578,31 +649,49 @@ export function StreamingClient(props: StreamingClientProps) {
                     <ChapterLessons
                       narrative={c.parsedNarrative}
                       sourceParagraphs={c.sourceParagraphs}
-                      renderLastLessonExtras={() => (
-                        <>
-                          {c.parsedQuestions && c.parsedQuestions.length > 0 ? (
-                            <QuizQuestions
-                              questions={c.parsedQuestions}
-                              sourceParagraphs={c.sourceParagraphs}
-                            />
-                          ) : null}
-                          {c.parsedFlashcards && c.parsedFlashcards.length > 0 ? (
-                            <ChapterFlashcards flashcards={c.parsedFlashcards} />
-                          ) : null}
-                          {canMarkComplete ? (
-                            <MarkCompleteButton
-                              tutorialId={tutorialId}
-                              chapterOrdinal={c.ordinal}
-                              csrfToken={csrfToken}
-                              onSuccess={() => router.refresh()}
-                            />
-                          ) : alreadyMarkedComplete ? (
-                            <p className="mt-4 inline-flex items-center gap-1 rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">
-                              ✓ Chapter complete
-                            </p>
-                          ) : null}
-                        </>
-                      )}
+                      renderLastLessonExtras={() => {
+                        // T2.6 gate: Mark Complete is blocked until the user
+                        // has clicked "Check answers" on the chapter's quiz
+                        // (or there is no quiz to attempt). Per the Sprint A
+                        // user-pick: "attempted, no pass required".
+                        const hasQuiz =
+                          (c.parsedQuestions?.length ?? 0) > 0;
+                        const quizAttempted =
+                          quizAttemptedByChapter.get(c.id) === true;
+                        const quizGateOk = !hasQuiz || quizAttempted;
+                        return (
+                          <>
+                            {c.parsedQuestions && c.parsedQuestions.length > 0 ? (
+                              <QuizQuestions
+                                questions={c.parsedQuestions}
+                                sourceParagraphs={c.sourceParagraphs}
+                                onAttempt={() => markQuizAttempted(c.id)}
+                              />
+                            ) : null}
+                            {c.parsedFlashcards && c.parsedFlashcards.length > 0 ? (
+                              <ChapterFlashcards flashcards={c.parsedFlashcards} />
+                            ) : null}
+                            {canMarkComplete ? (
+                              <MarkCompleteButton
+                                tutorialId={tutorialId}
+                                chapterOrdinal={c.ordinal}
+                                csrfToken={csrfToken}
+                                onSuccess={() => router.refresh()}
+                                disabled={!quizGateOk}
+                                disabledReason={
+                                  hasQuiz && !quizAttempted
+                                    ? 'Attempt the quiz above to unlock'
+                                    : undefined
+                                }
+                              />
+                            ) : alreadyMarkedComplete ? (
+                              <p className="mt-4 inline-flex items-center gap-1 rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">
+                                ✓ Chapter complete
+                              </p>
+                            ) : null}
+                          </>
+                        );
+                      }}
                     />
                   ) : c.status === 'failed' ? (
                     <p className="rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
@@ -647,6 +736,14 @@ interface StreamStatusBadgeProps {
 }
 
 function StreamStatusBadge({ status, reconnectCount }: StreamStatusBadgeProps) {
+  // Persona-Sprint-A T2.5 fix: hide the badge entirely when the stream is
+  // idle. Showing `IDLE` to a reader on a fully-loaded tutorial is opaque
+  // developer-state leaking into the UX. We still render — with the
+  // appropriate label — for streaming / reconnecting / completed / errored
+  // states where the status carries information the user actually wants.
+  if (status === 'idle') {
+    return null;
+  }
   // Mapping from machine state → user-readable label.
   const label = STATUS_LABEL[status];
   const className = STATUS_CLASSES[status];
@@ -716,41 +813,150 @@ interface QuizQuestionsProps {
   sourceParagraphs: SourceParagraph[];
 }
 
-function QuizQuestions({ questions }: QuizQuestionsProps) {
+/**
+ * Persona-Sprint-A T2.6: make the quiz interactive + report attempt status.
+ *
+ * Pre-Sprint-A behavior was an inert answer key in a `<details>` block —
+ * users could click "Mark complete" without engaging with the questions
+ * at all. That defeated the lazy-hybrid-chunking gate's pedagogical
+ * intent (release-policy.ts requires meaningful chapter completion; the
+ * UI undermined it).
+ *
+ * New behavior:
+ *   - Render radio inputs per question.
+ *   - User selects answers; clicking "Check answers" reveals correctness
+ *     + computes a score.
+ *   - Calling `onAttempt(true)` propagates to the parent so the Mark
+ *     Complete button can ungate. Attempt-once, not pass-required (per
+ *     user-pick during Sprint A planning: "Block until quiz attempted,
+ *     no pass required").
+ *
+ * Why <details> wrapper retained: keeps the quiz collapsible so it
+ * doesn't dominate the lesson canvas, but unlike before, opening it
+ * exposes interactive controls rather than a cheat sheet.
+ */
+interface QuizQuestionsInteractiveProps extends QuizQuestionsProps {
+  onAttempt?: () => void;
+}
+
+function QuizQuestions({ questions, onAttempt }: QuizQuestionsInteractiveProps) {
+  // Per-question selected option index. -1 = unselected.
+  const [selected, setSelected] = useState<number[]>(() =>
+    questions.map(() => -1),
+  );
+  const [checked, setChecked] = useState(false);
+
+  // T2.6 hook: fire `onAttempt` exactly once, when the user first reveals
+  // the answers. Subsequent clicks (e.g., re-checks after changing a
+  // selection) don't refire because the parent only cares whether the
+  // chapter has been engaged with at all.
+  const handleCheck = useCallback(() => {
+    if (checked) return;
+    setChecked(true);
+    onAttempt?.();
+  }, [checked, onAttempt]);
+
+  const handleSelect = useCallback((qIdx: number, optIdx: number) => {
+    setSelected((prev) => {
+      const next = [...prev];
+      next[qIdx] = optIdx;
+      return next;
+    });
+  }, []);
+
+  // Score is only shown after the user checks. Counts items where the
+  // user selected the correct option index.
+  const correctCount = checked
+    ? selected.reduce<number>(
+        (acc, optIdx, qIdx) =>
+          acc + (optIdx === questions[qIdx]?.correctIndex ? 1 : 0),
+        0,
+      )
+    : 0;
+  const answeredCount = selected.filter((s) => s >= 0).length;
+
   return (
-    <details className="mt-6 rounded border border-border bg-card/40">
+    <details className="mt-6 rounded border border-border bg-card/40" open={checked}>
       <summary className="cursor-pointer px-4 py-2 text-sm font-medium hover:bg-accent/30">
         Quiz · {questions.length} question{questions.length === 1 ? '' : 's'}
+        {checked ? (
+          <span className="ml-2 text-xs font-normal text-muted-foreground">
+            (you scored {correctCount} / {questions.length})
+          </span>
+        ) : null}
       </summary>
-      <ol className="space-y-4 px-4 py-3 text-sm">
-        {questions.map((q, i) => (
-          <li key={i} className="space-y-2">
-            <p className="font-medium">
-              {i + 1}. {q.prompt}
-            </p>
-            <ul className="ml-4 list-disc space-y-1 text-muted-foreground">
-              {q.options.map((opt, j) => (
-                <li
-                  key={j}
-                  className={
-                    j === q.correctIndex
-                      ? 'text-emerald-700 dark:text-emerald-300'
-                      : ''
-                  }
-                >
-                  {opt}
-                  {j === q.correctIndex ? ' ✓' : ''}
-                </li>
-              ))}
-            </ul>
-            {q.explanation ? (
-              <p className="text-xs italic text-muted-foreground">
-                {q.explanation}
+      <ol className="space-y-5 px-4 py-3 text-sm">
+        {questions.map((q, i) => {
+          const userPick = selected[i] ?? -1;
+          return (
+            <li key={i} className="space-y-2">
+              <p className="font-medium">
+                {i + 1}. {q.prompt}
               </p>
-            ) : null}
-          </li>
-        ))}
+              <ul className="ml-1 space-y-1.5">
+                {q.options.map((opt, j) => {
+                  const isUserPick = userPick === j;
+                  const isCorrect = j === q.correctIndex;
+                  // Highlight: only after check. Before check: just the
+                  // selected radio. After check: green = correct,
+                  // red = user's wrong pick.
+                  let tone = '';
+                  if (checked) {
+                    if (isCorrect)
+                      tone = 'text-emerald-700 dark:text-emerald-300';
+                    else if (isUserPick)
+                      tone = 'text-destructive line-through opacity-70';
+                  }
+                  return (
+                    <li key={j}>
+                      <label className={`flex items-start gap-2 cursor-pointer rounded px-2 py-1 hover:bg-accent/20 ${tone}`}>
+                        <input
+                          type="radio"
+                          name={`q-${i}`}
+                          value={j}
+                          checked={isUserPick}
+                          disabled={checked}
+                          onChange={() => handleSelect(i, j)}
+                          className="mt-0.5"
+                        />
+                        <span>{opt}</span>
+                        {checked && isCorrect ? <span aria-label="Correct answer">✓</span> : null}
+                      </label>
+                    </li>
+                  );
+                })}
+              </ul>
+              {checked && q.explanation ? (
+                <p className="text-xs italic text-muted-foreground border-l-2 border-border pl-2">
+                  {q.explanation}
+                </p>
+              ) : null}
+            </li>
+          );
+        })}
       </ol>
+      <div className="border-t border-border px-4 py-2 flex items-center justify-between">
+        {!checked ? (
+          <>
+            <span className="text-xs text-muted-foreground">
+              {answeredCount} / {questions.length} answered
+            </span>
+            <button
+              type="button"
+              onClick={handleCheck}
+              disabled={answeredCount === 0}
+              className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Check answers
+            </button>
+          </>
+        ) : (
+          <span className="text-xs text-muted-foreground">
+            You scored <strong className="text-foreground">{correctCount} / {questions.length}</strong>
+            {correctCount === questions.length ? ' — perfect!' : null}
+          </span>
+        )}
+      </div>
     </details>
   );
 }
@@ -815,9 +1021,20 @@ interface MarkCompleteButtonProps {
   chapterOrdinal: number;
   csrfToken: string;
   onSuccess: () => void;
+  /** When true, the button is rendered disabled (e.g., quiz gate). */
+  disabled?: boolean;
+  /** Human-readable reason for the disabled state; shown alongside the button. */
+  disabledReason?: string;
 }
 
-function MarkCompleteButton({ tutorialId, chapterOrdinal, csrfToken, onSuccess }: MarkCompleteButtonProps) {
+function MarkCompleteButton({
+  tutorialId,
+  chapterOrdinal,
+  csrfToken,
+  onSuccess,
+  disabled,
+  disabledReason,
+}: MarkCompleteButtonProps) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -850,16 +1067,25 @@ function MarkCompleteButton({ tutorialId, chapterOrdinal, csrfToken, onSuccess }
     }
   }
 
+  const isDisabled = submitting || disabled === true;
   return (
     <div className="mt-4 flex items-center gap-3">
       <button
         type="button"
         onClick={handleClick}
-        disabled={submitting}
+        disabled={isDisabled}
+        // T2.6: pair the visual disable with an aria-disabled signal +
+        // tooltip text when blocked by the quiz gate. Keyboard + assistive-
+        // tech users get the same information as sighted users.
+        aria-disabled={isDisabled}
+        title={disabled === true && disabledReason ? disabledReason : undefined}
         className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {submitting ? 'Marking complete…' : 'Mark complete & unlock next'}
       </button>
+      {disabled === true && disabledReason ? (
+        <p className="text-xs text-muted-foreground">{disabledReason}</p>
+      ) : null}
       {error ? (
         <p role="alert" className="text-xs text-destructive">
           {error}
