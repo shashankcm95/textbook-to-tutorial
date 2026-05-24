@@ -410,13 +410,26 @@ export async function scoreAnchorCandidates(
     operationName: 'anchor-scorer',
     abortSignal,
     isParseError: (err) => err instanceof AnchorScorerParseError,
-    fn: async () => {
+    fn: async (attempt) => {
+      // Wave-2 review HIGH 2A-H2 fix: honor `withRetry`'s attempt index.
+      // On a parse-retry (attempt > 0), append a stricter JSON-only
+      // reminder so the second attempt has a different prompt than the
+      // first. Strict-mode schema already enforces shape at the API
+      // boundary, but the reminder gives the model a more emphatic
+      // instruction for the rare cases where the schema validation
+      // path fails (e.g., the model emitted text outside the JSON
+      // block). Mirrors the legacy streaming.ts pattern (test3 Phase 3).
+      const effectiveUserPrompt =
+        attempt > 0
+          ? `${userPrompt}\n\n[RETRY NOTE: the previous attempt produced output that did not conform to the response schema. Emit ONLY valid JSON matching the schema; no prose, no markdown fence, no \`keep: false\` entries.]`
+          : userPrompt;
+
       const response = await openai.chat.completions.create(
         {
           model: MODEL,
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: userPrompt },
+            { role: 'user', content: effectiveUserPrompt },
           ],
           response_format: ANCHOR_SCORER_RESPONSE_FORMAT,
           max_tokens: MAX_COMPLETION_TOKENS,
@@ -479,8 +492,24 @@ export async function scoreAnchorCandidates(
       //
       // This is the "auto-survive" branch of the spec: glossary-sourced
       // candidates ride into the top-30 even when the LLM said no.
+      //
+      // Wave-2 review HIGH 2A-H1 fix: zero-frequency guard. The anchor
+      // validator's contract is "if a whitelist anchor appears in the
+      // chunk's source paragraphs, the narrative must contain it
+      // verbatim." A glossary term that the author defined but NEVER
+      // used in any body paragraph (frequency === 0) cannot satisfy
+      // the validator's "appears in source" precondition, so adding it
+      // to the whitelist is dead weight at best (no signal for the
+      // narrative prompt; no validation can fire). At worst it bloats
+      // the prompt + crowds out real anchors. The spec's "canonical
+      // author intent" rationale only holds when the author actually
+      // USED the term — defining it in a glossary entry but never
+      // referring to it is the case where authorial intent diverges
+      // from authorial practice; we follow practice for the validator's
+      // sake.
       for (const c of candidates) {
         if (c.glossary_priority !== true) continue;
+        if (c.frequency <= 0) continue; // Wave-2 review HIGH 2A-H1
         const key = c.term.toLowerCase();
         if (acceptedKeys.has(key)) continue;
         acceptedKeys.add(key);

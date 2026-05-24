@@ -302,3 +302,67 @@ describe('BuildNarrativeOnlySystemPromptArgs — type smoke', () => {
     expect(() => buildNarrativeOnlySystemPrompt(args)).not.toThrow();
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// Wave-2 review fix-up regression guards
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('renderVoiceProfileSection — Wave-2 review HIGH 2B-H1 (empty example_phrases)', () => {
+  it('omits the example-phrases header when example_phrases is empty', () => {
+    const voiceProfile = makeVoiceProfile();
+    voiceProfile.example_phrases = [];
+    const prompt = buildNarrativeOnlySystemPrompt({ voiceProfile });
+
+    // The header MUST NOT appear when there are no phrases to list under it.
+    expect(prompt).not.toContain('Example phrases that sound DISTINCTIVELY');
+
+    // But the rest of the voice section MUST still render.
+    expect(prompt).toContain('AUTHOR VOICE PROFILE');
+    expect(prompt).toContain(`Tone: ${voiceProfile.tone_summary}`);
+    expect(prompt).toContain('Signature moves');
+  });
+});
+
+describe('renderers — Wave-2 review HIGH 2B-H2 (defensive size caps)', () => {
+  it('caps signature_moves at 10 entries (defends against extractor cardinality drift)', () => {
+    const voiceProfile = makeVoiceProfile();
+    voiceProfile.signature_moves = Array.from({ length: 50 }, (_, i) => ({
+      name: `Move ${i + 1}`,
+      description: `description ${i + 1}`,
+    }));
+    const prompt = buildNarrativeOnlySystemPrompt({ voiceProfile });
+
+    // First 10 must appear.
+    expect(prompt).toContain('1. Move 1: description 1');
+    expect(prompt).toContain('10. Move 10: description 10');
+    // Move 11 onward must NOT appear.
+    expect(prompt).not.toContain('11. Move 11');
+    expect(prompt).not.toContain('Move 25');
+  });
+
+  it('caps example_phrases at 10 entries', () => {
+    const voiceProfile = makeVoiceProfile();
+    voiceProfile.example_phrases = Array.from({ length: 30 }, (_, i) => ({
+      phrase: `unique-phrase-${i + 1}`,
+      ref: `page1:paragraph${i}`,
+    }));
+    const prompt = buildNarrativeOnlySystemPrompt({ voiceProfile });
+
+    expect(prompt).toContain('unique-phrase-1');
+    expect(prompt).toContain('unique-phrase-10');
+    expect(prompt).not.toContain('unique-phrase-11');
+    expect(prompt).not.toContain('unique-phrase-25');
+  });
+
+  it('caps anchorWhitelist at 30 entries (defends against scorer drift)', () => {
+    const anchorWhitelist = Array.from({ length: 60 }, (_, i) =>
+      makeAnchor(`anchor-term-${i + 1}`),
+    );
+    const prompt = buildNarrativeOnlySystemPrompt({ anchorWhitelist });
+
+    expect(prompt).toContain('anchor-term-1');
+    expect(prompt).toContain('anchor-term-30');
+    expect(prompt).not.toContain('anchor-term-31');
+    expect(prompt).not.toContain('anchor-term-45');
+  });
+});

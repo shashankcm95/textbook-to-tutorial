@@ -406,6 +406,82 @@ describe('scoreAnchorCandidates', () => {
     expect(result.whitelist.find((e) => e.term === 'ng-29')).toBeUndefined();
   });
 
+  it('Wave-2 review HIGH 2A-H1: zero-frequency glossary candidate is NOT force-added', async () => {
+    // A glossary term the author defined but NEVER USED in body has
+    // frequency=0. The anchor-validator can never find it in any
+    // source paragraph, so adding it to the whitelist is dead weight
+    // (and may displace a real anchor). The force-add path now guards
+    // with c.frequency > 0.
+    const candidates = [
+      // 5 non-glossary candidates that the LLM will accept
+      makeCandidate({ term: 'real-anchor-1', frequency: 10 }),
+      makeCandidate({ term: 'real-anchor-2', frequency: 9 }),
+      makeCandidate({ term: 'real-anchor-3', frequency: 8 }),
+      // Glossary candidate with freq=0 — author defined but never used
+      makeCandidate({
+        term: 'GHOST_GLOSSARY_TERM',
+        frequency: 0,
+        glossary_priority: true,
+      }),
+    ];
+    // LLM accepts the 3 real anchors, rejects the ghost glossary term.
+    const content = JSON.stringify({
+      anchors: [
+        { term: 'real-anchor-1', category: 'search-term', keep: true },
+        { term: 'real-anchor-2', category: 'search-term', keep: true },
+        { term: 'real-anchor-3', category: 'search-term', keep: true },
+      ],
+    });
+    createMock.mockResolvedValueOnce(buildOpenAIResponse(content));
+
+    const result = await scoreAnchorCandidates({
+      pdfSha256: 'sha-zero-freq-glossary',
+      candidates,
+    });
+
+    // The ghost glossary term must NOT be in the whitelist despite its
+    // glossary_priority flag, because freq=0 makes it unverifiable.
+    expect(result.whitelist.find((e) => e.term === 'GHOST_GLOSSARY_TERM')).toBeUndefined();
+    // The 3 real anchors must all survive.
+    expect(result.whitelist.length).toBe(3);
+  });
+
+  it('Wave-2 review HIGH 2A-H2: parse-retry attempt index propagates to fn closure', async () => {
+    // The retry pattern is: first attempt returns bad-shape JSON, second
+    // attempt receives the same user prompt PLUS a stricter [RETRY NOTE]
+    // suffix (which the fn closure appends when attempt > 0). We assert
+    // the second call's user-message content differs from the first.
+    const candidates = [makeCandidate({ term: 'x', frequency: 1 })];
+    createMock
+      .mockResolvedValueOnce(
+        buildOpenAIResponse(JSON.stringify({ unrelated: 'object' })),
+      ) // attempt 0: bad shape -> parse-retry
+      .mockResolvedValueOnce(buildOpenAIResponse(buildLLMContentFromCandidates(candidates))); // attempt 1: succeeds
+
+    const result = await scoreAnchorCandidates({
+      pdfSha256: 'sha-retry-attempt',
+      candidates,
+    });
+
+    expect(result.whitelist.length).toBe(1);
+    expect(createMock.mock.calls.length).toBe(2);
+
+    // Pull the user-message text from each call. The first must NOT contain
+    // the retry note; the second MUST contain it.
+    const firstCall = createMock.mock.calls[0]?.[0] as
+      | { messages: Array<{ role: string; content: string }> }
+      | undefined;
+    const secondCall = createMock.mock.calls[1]?.[0] as
+      | { messages: Array<{ role: string; content: string }> }
+      | undefined;
+    const firstUser = firstCall?.messages.find((m) => m.role === 'user')?.content ?? '';
+    const secondUser = secondCall?.messages.find((m) => m.role === 'user')?.content ?? '';
+
+    expect(firstUser).not.toContain('[RETRY NOTE');
+    expect(secondUser).toContain('[RETRY NOTE');
+    expect(secondUser).toContain('did not conform to the response schema');
+  });
+
   it('enforces 30-entry cap when LLM returns 100 candidates', async () => {
     const candidates = makeNCandidates(100, 200);
     createMock.mockResolvedValueOnce(
@@ -465,6 +541,14 @@ describe('scoreAnchorCandidates', () => {
   });
 
   it('throws AnchorScorerParseError when JSON is valid but shape is wrong', async () => {
+    // Wave-2 review HIGH 2A-H3 fix: pin the assertion to the actual
+    // upper bound (maxAttempts() = 7 in withRetry's shared-attempt-
+    // counter model). The original assertion just `rejects.toBeInstanceOf`
+    // — which passed regardless of how many retry attempts fired. With
+    // `mockResolvedValue` (not Once), every attempt re-encounters the
+    // bad shape; parseError walks the [0]ms slot from `Math.min(attempt,
+    // 0) === 0` on every iteration, so all 7 attempts get a retry slot.
+    // Pinning the call count catches regressions in either direction.
     const candidates = [makeCandidate({ term: 'x', frequency: 1 })];
     createMock.mockResolvedValue(
       buildOpenAIResponse(JSON.stringify({ unrelated: 'object' })),
@@ -476,6 +560,9 @@ describe('scoreAnchorCandidates', () => {
         candidates,
       }),
     ).rejects.toBeInstanceOf(AnchorScorerParseError);
+
+    // maxAttempts() = 1 initial + 3 rateLimit + 2 serverError + 1 parseError = 7
+    expect(createMock.mock.calls.length).toBe(7);
   });
 
   it('computes cost correctly from usage tokens', async () => {

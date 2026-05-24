@@ -127,6 +127,20 @@ function baseSystemPromptLines(): string[] {
  * still surface its tone_summary + signature_moves rather than be silently
  * dropped.
  */
+// Wave-2 review HIGH 2B-H2 fix: defensive caps inside the renderers.
+// Upstream pipeline (Wave 2A's scorer) caps the whitelist at 30 and the
+// voice extractor's strict schema bounds the array sizes — but THIS module
+// is the last line of defense before the prompt hits the LLM, so it
+// enforces its own ceilings rather than trusting upstream contract. If a
+// future pipeline change increases extractor cardinality, this cap keeps
+// the token budget bounded. Values match the design doc: 30 anchors max,
+// ~10 voice elements per category (covers the bounded D2 sizes of 3-5 / 5-8 / 1-3 / 1-3).
+const MAX_SIGNATURE_MOVES = 10;
+const MAX_EXAMPLE_PHRASES = 10;
+const MAX_HUMOR_PATTERNS = 5;
+const MAX_PREFERRED_ANALOGIES = 5;
+const MAX_ANCHOR_WHITELIST_ENTRIES = 30;
+
 function renderVoiceProfileSection(profile: VoiceProfile | undefined): string | null {
   if (!profile) return null;
 
@@ -136,21 +150,29 @@ function renderVoiceProfileSection(profile: VoiceProfile | undefined): string | 
     '',
     '  Signature moves this author uses (preserve where the source paragraphs show them):',
   ];
-  profile.signature_moves.forEach((move, i) => {
+  profile.signature_moves.slice(0, MAX_SIGNATURE_MOVES).forEach((move, i) => {
     lines.push(`    ${i + 1}. ${move.name}: ${move.description}`);
   });
 
-  lines.push('');
-  lines.push(
-    '  Example phrases that sound DISTINCTIVELY like this author (KEEP THESE VERBATIM where they appear in your source paragraphs):',
-  );
-  profile.example_phrases.forEach((p) => {
-    lines.push(`    - "${p.phrase}" [${p.ref}]`);
-  });
+  // Wave-2 review HIGH 2B-H1 fix: guard example_phrases with .length > 0
+  // like the sibling humor/analogies sections. Previously the header was
+  // pushed unconditionally — an extractor returning empty example_phrases
+  // (allowed by the JSON schema; no minItems constraint) would render
+  // "Example phrases ...:" with nothing below, wasting ~15 tokens and
+  // sending a confusing instruction with no concrete examples.
+  if (profile.example_phrases.length > 0) {
+    lines.push('');
+    lines.push(
+      '  Example phrases that sound DISTINCTIVELY like this author (KEEP THESE VERBATIM where they appear in your source paragraphs):',
+    );
+    profile.example_phrases.slice(0, MAX_EXAMPLE_PHRASES).forEach((p) => {
+      lines.push(`    - "${p.phrase}" [${p.ref}]`);
+    });
+  }
 
   if (profile.humor_patterns.length > 0) {
     lines.push('');
-    profile.humor_patterns.forEach((h, i) => {
+    profile.humor_patterns.slice(0, MAX_HUMOR_PATTERNS).forEach((h, i) => {
       const label = i === 0 ? '  Humor / register: ' : '                    ';
       lines.push(`${label}${h}`);
     });
@@ -158,7 +180,7 @@ function renderVoiceProfileSection(profile: VoiceProfile | undefined): string | 
 
   if (profile.preferred_analogies.length > 0) {
     lines.push('');
-    profile.preferred_analogies.forEach((a, i) => {
+    profile.preferred_analogies.slice(0, MAX_PREFERRED_ANALOGIES).forEach((a, i) => {
       const label = i === 0 ? '  Preferred analogy types: ' : '                           ';
       lines.push(`${label}${a}`);
     });
@@ -187,7 +209,10 @@ function renderAnchorWhitelistSection(
     '  voice and pedagogical fidelity.',
     '',
   ];
-  whitelist.forEach((a) => {
+  // Wave-2 review HIGH 2B-H2 fix: defensive cap. Upstream (Wave 2A's
+  // anchor-scorer) caps at 30, but this module enforces its own bound
+  // as a final defense against future pipeline cardinality changes.
+  whitelist.slice(0, MAX_ANCHOR_WHITELIST_ENTRIES).forEach((a) => {
     lines.push(`    - "${a.term}" (${a.category})`);
   });
   return lines.join('\n');
