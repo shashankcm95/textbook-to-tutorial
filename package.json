@@ -29,6 +29,7 @@
     "drizzle-orm": "0.32.1",
     "isomorphic-dompurify": "2.14.0",
     "lucide-react": "0.408.0",
+    "mermaid": "^11.15.0",
     "next": "14.2.5",
     "openai": "4.55.0",
     "pdfjs-dist": "4.5.136",
@@ -40,25 +41,25 @@
     "zod": "3.23.8"
   },
   "devDependencies": {
+    "@testing-library/dom": "10.4.0",
+    "@testing-library/jest-dom": "6.4.8",
+    "@testing-library/react": "16.0.1",
     "@types/better-sqlite3": "7.6.11",
     "@types/dompurify": "3.0.5",
     "@types/node": "20.14.12",
     "@types/react": "18.3.3",
     "@types/react-dom": "18.3.0",
+    "@vitejs/plugin-react": "4.3.1",
     "autoprefixer": "10.4.19",
     "drizzle-kit": "0.23.0",
     "eslint": "8.57.0",
     "eslint-config-next": "14.2.5",
     "fast-check": "3.21.0",
+    "jsdom": "25.0.0",
     "postcss": "8.4.40",
     "tailwindcss": "3.4.7",
     "tsx": "4.16.2",
     "typescript": "5.5.4",
-    "vitest": "2.0.4",
-    "@testing-library/react": "16.0.1",
-    "@testing-library/dom": "10.4.0",
-    "@testing-library/jest-dom": "6.4.8",
-    "@vitejs/plugin-react": "4.3.1",
-    "jsdom": "25.0.0"
+    "vitest": "2.0.4"
   }
 }

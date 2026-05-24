@@ -59,6 +59,7 @@ import {
 import { StreamingClient } from './StreamingClient';
 import type { ReviewableCard } from '@/components/FlashcardReviewer';
 import type { QuizQuestion, LLMFlashcard } from '@/lib/types';
+import { bookMetadataFromS3Url } from '@/lib/book-metadata';
 
 // Force dynamic rendering — this page is per-user; static caching would be
 // catastrophic (one user could see another's tutorial). Setting at the file
@@ -263,6 +264,7 @@ export default async function TutorialPage({ params }: TutorialPageProps) {
       initialReviewCards={initialReviewCards}
       initialQuestionsByChapter={initialQuestionsByChapter}
       initialFlashcardsByChapter={initialFlashcardsByChapter}
+      bookMetadata={bookMetadataFromS3Url(tutorial.sourceS3Url)}
       csrfToken={csrfToken}
       maxUnlockedChapterIdx={tutorial.maxUnlockedChapterIdx}
     />

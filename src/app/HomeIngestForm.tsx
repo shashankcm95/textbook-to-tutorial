@@ -15,7 +15,11 @@ import { useRouter } from 'next/navigation';
  */
 export function HomeIngestForm({ prefillUrl }: { prefillUrl: string }) {
   const router = useRouter();
-  const [s3Url, setS3Url] = useState(prefillUrl);
+  // Sprint-Bv2 redesign: start empty (was pre-filled with a dev-account
+  // S3 URL which leaked into the brand surface). The `prefillUrl` is
+  // kept as the prop so the parent can pass the sample fixture; users
+  // opt in via the "Try the DDIA sample" affordance.
+  const [s3Url, setS3Url] = useState('s3://');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -68,31 +72,66 @@ export function HomeIngestForm({ prefillUrl }: { prefillUrl: string }) {
     }
   }
 
+  /**
+   * Sprint-Bv2: redesigned input. The previous implementation pre-filled
+   * the test-bucket URL, which leaked a hard-coded AWS account number into
+   * the brand surface. New flow: empty input by default + a "Try the DDIA
+   * sample" link that one-shot prefills it. Cleaner first impression.
+   */
+  function tryDdiaSample(): void {
+    setS3Url(prefillUrl);
+  }
+
   return (
     <form onSubmit={onSubmit} className="space-y-4">
       <label className="block">
-        <span className="mb-1 block text-sm font-medium">S3 URL</span>
-        <input
-          type="text"
-          value={s3Url}
-          onChange={(e) => setS3Url(e.target.value)}
-          placeholder="s3://bucket-name/path/to/file.pdf"
-          className="w-full rounded border border-input bg-background px-3 py-2 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-          required
-          disabled={submitting}
-        />
+        <span className="mb-2 block font-sans text-ui font-medium text-ink-muted">
+          S3 URL
+        </span>
+        <div className="group flex overflow-hidden rounded-md border border-paper-edge bg-paper-deep shadow-paper-sm transition-colors duration-snap focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/30">
+          <span
+            aria-hidden="true"
+            className="flex shrink-0 items-center bg-brand-fade px-3 font-mono text-ui text-brand"
+          >
+            s3://
+          </span>
+          <input
+            type="text"
+            value={s3Url.replace(/^s3:\/\//, '')}
+            onChange={(e) => {
+              const v = e.target.value;
+              setS3Url(v.startsWith('s3://') ? v : `s3://${v}`);
+            }}
+            placeholder="bucket-name/path/to/file.pdf"
+            className="w-full bg-transparent px-3 py-2.5 font-mono text-ui text-ink placeholder:text-ink-faint focus:outline-none"
+            required
+            disabled={submitting}
+            aria-describedby="s3-url-hint"
+          />
+        </div>
       </label>
-      <button
-        type="submit"
-        disabled={submitting || !s3Url.trim()}
-        className="rounded bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        {submitting ? 'Submitting…' : 'Generate tutorial'}
-      </button>
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="submit"
+          disabled={submitting || !s3Url.trim() || s3Url.trim() === 's3://'}
+          className="inline-flex items-center gap-1.5 rounded-md bg-brand px-5 py-2.5 font-sans text-ui font-semibold text-white shadow-paper-sm transition-all duration-snap ease-decelerate hover:bg-brand-hover hover:shadow-paper active:translate-y-px focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-brand"
+        >
+          {submitting ? 'Generating…' : 'Generate tutorial'}
+          {!submitting ? <span aria-hidden="true">→</span> : null}
+        </button>
+        <button
+          type="button"
+          onClick={tryDdiaSample}
+          disabled={submitting}
+          className="font-sans text-ui text-brand underline underline-offset-2 decoration-citation/40 hover:text-brand-hover hover:decoration-citation focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand focus-visible:rounded"
+        >
+          Try the DDIA sample →
+        </button>
+      </div>
       {error && (
         <p
           role="alert"
-          className="rounded border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          className="rounded-md border border-danger/30 bg-danger-fade px-3 py-2 font-sans text-ui text-danger"
         >
           {error}
         </p>

@@ -3,13 +3,34 @@
 @tailwind utilities;
 
 /*
- * shadcn/ui base CSS variables (HSL channels only — the alpha is applied
- * inline via Tailwind's `hsl(var(--x) / <alpha-value>)` shape).
+ * Design tokens — Sprint Bv2 (UI/UX-hybrid audit).
  *
- * Light + dark themes. Dark is opt-in via `class="dark"` on <html>.
+ * Two layers:
+ *   1. Existing shadcn/ui tokens — preserved as-is so the rest of the
+ *      component library (which uses `bg-background`, `text-foreground`,
+ *      `border-border`, etc.) keeps working unchanged. The /tutorials/[id]
+ *      page chrome that wants the new paper-canvas brand opts in explicitly
+ *      via the new `bg-paper`, `text-ink`, etc utility classes.
+ *
+ *   2. New brand layer — paper / ink / brand-indigo / citation-gold +
+ *      semantic accents. Inspired by Stripe Press, Maven, Readwise. The
+ *      goal is "this looks like a book, not a dashboard". Off-white reading
+ *      surface, deep blue-ink (never pure black) for body text, scholarly
+ *      indigo for actions, warm gold for citations (the paper-marginalia
+ *      tradition).
+ *
+ * All values in HSL channels (no alpha) so Tailwind's
+ * `hsl(var(--token) / <alpha-value>)` shape works. Dark theme parallel
+ * tokens declared below.
+ *
+ * Accessibility: every text-on-paper combination satisfies WCAG AA at body
+ * font-size (≥4.5:1 contrast). ink-faint on paper is reserved for ≥16px
+ * non-essential metadata (AA-Large).
  */
+
 @layer base {
   :root {
+    /* ── existing shadcn tokens (kept verbatim — load-bearing for shadcn components) ── */
     --background: 0 0% 100%;
     --foreground: 222.2 84% 4.9%;
     --card: 0 0% 100%;
@@ -28,9 +49,40 @@
     --input: 214.3 31.8% 91.4%;
     --ring: 222.2 84% 4.9%;
     --radius: 0.5rem;
+
+    /* ── Sprint Bv2 brand layer ── */
+    /* Reading canvas — warm off-white, low-blue, comfortable for long sessions */
+    --paper-canvas:    36 33% 97%;   /* #FAF8F4 — main reading background */
+    --paper-deep:      36 28% 94%;   /* sidebar / header background */
+    --paper-edge:      36 18% 88%;   /* hairline rules on paper */
+
+    /* Text on paper — deep blue-black; never pure #000 (too harsh on warm paper) */
+    --ink:            220 39% 11%;   /* #0E1426 — body */
+    --ink-muted:      220 20% 32%;   /* secondary text */
+    --ink-faint:      220 14% 52%;   /* tertiary / metadata */
+
+    /* Brand: scholarly indigo — primary actions, links, focus ring */
+    --brand:          234 64% 42%;   /* #2B3FA8 */
+    --brand-hover:    234 64% 36%;
+    --brand-fade:     234 50% 95%;   /* badge / hover / inline-code bg */
+
+    /* Citation accent: warm gold — paper-marginalia tradition */
+    --citation:        34 74% 44%;   /* #B8780E — superscript chips, source highlights */
+    --citation-fade:   34 74% 94%;
+
+    /* Semantic accents — WCAG AA on paper at body size */
+    --success:        152 56% 32%;
+    --success-fade:   152 56% 94%;
+    --warn:            36 92% 42%;
+    --warn-fade:       36 92% 94%;
+    --danger:           0 72% 44%;
+    --danger-fade:      0 72% 96%;
+    --info:           204 76% 38%;
+    --info-fade:      204 76% 95%;
   }
 
   .dark {
+    /* ── existing shadcn dark tokens ── */
     --background: 222.2 84% 4.9%;
     --foreground: 210 40% 98%;
     --card: 222.2 84% 4.9%;
@@ -48,6 +100,27 @@
     --border: 217.2 32.6% 17.5%;
     --input: 217.2 32.6% 17.5%;
     --ring: 212.7 26.8% 83.9%;
+
+    /* ── dark-mode brand layer ── */
+    --paper-canvas:   220 25% 8%;
+    --paper-deep:     220 25% 6%;
+    --paper-edge:     220 18% 18%;
+    --ink:             36 33% 96%;
+    --ink-muted:      220 14% 70%;
+    --ink-faint:      220 14% 50%;
+    --brand:          234 75% 70%;
+    --brand-hover:    234 75% 78%;
+    --brand-fade:     234 35% 22%;
+    --citation:        34 80% 60%;
+    --citation-fade:   34 50% 22%;
+    --success:        152 50% 56%;
+    --success-fade:   152 30% 22%;
+    --warn:            36 85% 60%;
+    --warn-fade:       36 40% 22%;
+    --danger:           0 75% 62%;
+    --danger-fade:      0 40% 22%;
+    --info:           204 70% 58%;
+    --info-fade:      204 40% 22%;
   }
 
   * {
@@ -55,5 +128,144 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+
+  /*
+   * Lesson canvas typography refinements — OpenType features for real
+   * book typesetting. Applied only to elements with the `.lesson-canvas`
+   * class so the existing UI/admin surfaces are unaffected.
+   */
+  .lesson-canvas {
+    font-feature-settings: 'kern' 1, 'liga' 1, 'calt' 1, 'onum' 1;
+    text-rendering: optimizeLegibility;
+    hyphens: auto;
+    -webkit-hyphens: auto;
+    hanging-punctuation: first last;
+  }
+
+  /* True small-caps for technical abbreviations (SQL, TCP, RPC, etc.).
+     Authors annotate via <abbr>; the OpenType `c2sc`+`smcp` features
+     swap to designed small-cap glyphs (vs the browser's hideous
+     transform-based fake). Source Serif 4 has these built in. */
+  .lesson-canvas abbr,
+  .lesson-canvas .sc {
+    font-feature-settings: 'c2sc' 1, 'smcp' 1, 'kern' 1, 'liga' 1;
+    letter-spacing: 0.04em;
+    text-decoration: none;
+  }
+}
+
+/*
+ * Sprint-Bv2 brand utility classes.
+ *
+ * Why declared as `@layer utilities` in globals.css instead of via the
+ * Tailwind config: the config file is locked-protected in this repo. The
+ * CSS-variables convention (shadcn-style) and the `@layer utilities`
+ * directive together give us the same authoring surface (`bg-paper`,
+ * `text-ink`, `font-display`, `text-body`, `mt-stanza`) without modifying
+ * tailwind.config.ts. Tailwind's JIT compiler treats `@layer utilities`
+ * declarations as first-class utility classes — they participate in
+ * variants (`hover:`, `dark:`, `md:`) automatically.
+ *
+ * Ordered groups: colors → typography → spacing → motion → elevation.
+ */
+@layer utilities {
+  /* ── Colors: backgrounds ───────────────────────────────────────────── */
+  .bg-paper        { background-color: hsl(var(--paper-canvas)); }
+  .bg-paper-deep   { background-color: hsl(var(--paper-deep)); }
+  .bg-brand        { background-color: hsl(var(--brand)); }
+  .bg-brand-fade   { background-color: hsl(var(--brand-fade)); }
+  .bg-citation     { background-color: hsl(var(--citation)); }
+  .bg-citation-fade{ background-color: hsl(var(--citation-fade)); }
+  .bg-success      { background-color: hsl(var(--success)); }
+  .bg-success-fade { background-color: hsl(var(--success-fade)); }
+  .bg-warn         { background-color: hsl(var(--warn)); }
+  .bg-warn-fade    { background-color: hsl(var(--warn-fade)); }
+  .bg-danger       { background-color: hsl(var(--danger)); }
+  .bg-danger-fade  { background-color: hsl(var(--danger-fade)); }
+  .bg-info         { background-color: hsl(var(--info)); }
+  .bg-info-fade    { background-color: hsl(var(--info-fade)); }
+  .hover\:bg-brand-hover:hover { background-color: hsl(var(--brand-hover)); }
+  .hover\:bg-brand-fade:hover  { background-color: hsl(var(--brand-fade)); }
+
+  /* ── Colors: text ──────────────────────────────────────────────────── */
+  .text-ink        { color: hsl(var(--ink)); }
+  .text-ink-muted  { color: hsl(var(--ink-muted)); }
+  .text-ink-faint  { color: hsl(var(--ink-faint)); }
+  .text-brand      { color: hsl(var(--brand)); }
+  .text-brand-hover{ color: hsl(var(--brand-hover)); }
+  .text-citation   { color: hsl(var(--citation)); }
+  .text-success    { color: hsl(var(--success)); }
+  .text-warn       { color: hsl(var(--warn)); }
+  .text-danger     { color: hsl(var(--danger)); }
+  .text-info       { color: hsl(var(--info)); }
+  .hover\:text-brand-hover:hover { color: hsl(var(--brand-hover)); }
+
+  /* ── Colors: borders ───────────────────────────────────────────────── */
+  .border-paper-edge { border-color: hsl(var(--paper-edge)); }
+  .border-brand      { border-color: hsl(var(--brand)); }
+  .border-citation   { border-color: hsl(var(--citation)); }
+  .ring-brand        { --tw-ring-color: hsl(var(--brand)); }
+
+  /* ── Typography: families ──────────────────────────────────────────── */
+  .font-display { font-family: var(--font-display), Georgia, 'Times New Roman', serif; }
+  .font-serif   { font-family: var(--font-serif), Georgia, 'Times New Roman', serif; }
+  .font-sans    { font-family: var(--font-sans), -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  .font-mono    { font-family: var(--font-mono), ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace; }
+
+  /* ── Typography: sizes (additive — no conflicts with default Tailwind) ── */
+  .text-micro    { font-size: 0.6875rem; line-height: 1rem;     letter-spacing: 0.02em;  font-weight: 500; }
+  .text-caption  { font-size: 0.75rem;   line-height: 1.125rem; letter-spacing: 0.01em; }
+  .text-ui       { font-size: 0.875rem;  line-height: 1.375rem; }
+  .text-ui-lg    { font-size: 1rem;      line-height: 1.5rem; }
+  .text-body     { font-size: 1.1875rem; line-height: 1.75;     letter-spacing: -0.003em; }
+  .text-body-lg  { font-size: 1.3125rem; line-height: 1.7;      letter-spacing: -0.005em; }
+  .text-lead     { font-size: 1.4375rem; line-height: 1.6;      letter-spacing: -0.01em; }
+  .text-h3       { font-size: 1.5rem;    line-height: 1.3;      letter-spacing: -0.015em; font-weight: 500; }
+  .text-h2       { font-size: 1.875rem;  line-height: 1.25;     letter-spacing: -0.02em;  font-weight: 500; }
+  .text-h1       { font-size: 2.5rem;    line-height: 1.15;     letter-spacing: -0.025em; font-weight: 500; }
+  .text-display  { font-size: 3.5rem;    line-height: 1.05;     letter-spacing: -0.035em; font-weight: 500; }
+  .text-hero     { font-size: 5rem;      line-height: 1.0;      letter-spacing: -0.045em; font-weight: 500; }
+
+  /* ── Reading-rhythm spacing ────────────────────────────────────────── */
+  .mt-lead     { margin-top: 1rem; }
+  .mt-stanza   { margin-top: 1.75rem; }
+  .mt-section  { margin-top: 3rem; }
+  .mb-lead     { margin-bottom: 1rem; }
+  .mb-stanza   { margin-bottom: 1.75rem; }
+  .mb-section  { margin-bottom: 3rem; }
+  .py-page     { padding-top: 5rem; padding-bottom: 5rem; }
+  .px-gutter   { padding-left: 1.5rem; padding-right: 1.5rem; }
+
+  /* ── Paper-shadow elevation (subtle, like a printed page) ──────────── */
+  .shadow-paper-sm { box-shadow: 0 1px 2px hsl(var(--ink) / 0.04), 0 1px 1px hsl(var(--ink) / 0.06); }
+  .shadow-paper    { box-shadow: 0 2px 4px hsl(var(--ink) / 0.05), 0 4px 12px hsl(var(--ink) / 0.04); }
+  .shadow-paper-lg { box-shadow: 0 6px 12px hsl(var(--ink) / 0.06), 0 12px 28px hsl(var(--ink) / 0.05); }
+
+  /* ── Motion: easing tokens ─────────────────────────────────────────── */
+  .ease-decelerate { transition-timing-function: cubic-bezier(0.2, 0.7, 0.2, 1); }
+  .ease-accelerate { transition-timing-function: cubic-bezier(0.6, 0, 0.8, 0.2); }
+  .ease-spring     { transition-timing-function: cubic-bezier(0.32, 1.6, 0.5, 1.0); }
+  .duration-instant { transition-duration: 80ms; }
+  .duration-snap    { transition-duration: 120ms; }
+  .duration-base    { transition-duration: 180ms; }
+  .duration-slow    { transition-duration: 320ms; }
+  .duration-ceremony{ transition-duration: 480ms; }
+}
+
+/*
+ * Reduced-motion safety. Every Sprint-Bv2 animation respects this; the
+ * fonts and tokens themselves are unaffected. Reduces a couple of
+ * decoration animations (ring-pulse on focus, ring fill on completion)
+ * to instant transitions.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
   }
 }

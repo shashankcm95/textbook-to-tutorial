@@ -51,6 +51,8 @@ import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import type { SourceParagraph } from '@/lib/types';
 import { CitationModal } from './CitationModal';
+import { LessonCanvas } from './LessonCanvas';
+import { MermaidDiagram } from './MermaidDiagram';
 
 // ───────────────────────────────────────────────────────────────────────────
 // Citation regex + tokenizer
@@ -270,6 +272,40 @@ export function ChapterRenderer({ narrative, sourceParagraphs }: ChapterRenderer
       h6: ({ children, ...rest }) => <h6 {...rest}>{tokenizeChildren(children)}</h6>,
       em: ({ children, ...rest }) => <em {...rest}>{tokenizeChildren(children)}</em>,
       strong: ({ children, ...rest }) => <strong {...rest}>{tokenizeChildren(children)}</strong>,
+      // Sprint-Bv2.5: detect ```mermaid fenced blocks and render them as
+      // an actual SVG diagram via the MermaidDiagram component. react-
+      // markdown passes the code block's language as a className like
+      // `language-mermaid`; falling back to the default render for any
+      // other language preserves syntax-highlighting / plain code blocks.
+      //
+      // The `inline` flag (true for inline `<code>` like `foo`) is
+      // explicitly passed-through unchanged — inline code never becomes
+      // a diagram, only fenced blocks.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      code: ({ inline, className, children, ...rest }: any) => {
+        const isMermaid =
+          !inline &&
+          typeof className === 'string' &&
+          /\blanguage-mermaid\b/.test(className);
+        if (isMermaid) {
+          // Mermaid source is the raw text content of the code block.
+          // react-markdown gives us children as an array of strings (or a
+          // single string); join + trim for safety against fence-trailing
+          // whitespace.
+          const source = (Array.isArray(children) ? children.join('') : String(children ?? '')).trim();
+          if (source.length === 0) return null;
+          return <MermaidDiagram source={source} />;
+        }
+        // Default: emit normal <code>. Inline code already gets the
+        // LessonCanvas mono+brand-fade style via the `[&_code]:…`
+        // selectors; we don't tokenize citations inside code (would
+        // mangle a literal `[ref:...]` example).
+        return (
+          <code className={className} {...rest}>
+            {children}
+          </code>
+        );
+      },
     }),
     [tokenizeChildren],
   );
@@ -288,9 +324,19 @@ export function ChapterRenderer({ narrative, sourceParagraphs }: ChapterRenderer
     return result;
   }, [active, sourceIndex]);
 
+  // Sprint-Bv2: swap the inline `prose prose-sm` wrapper for the brand
+  // `<LessonCanvas>` (Source Serif 4 at 19/1.75, Newsreader headings,
+  // hung punctuation, OpenType ligatures). The CitationModal stays
+  // outside the canvas — modals belong at the document root, not
+  // nested inside the lesson typography. drop-cap is opt-in via the
+  // forthcoming `isFirstLesson` prop threaded from ChapterLessons in
+  // a follow-up; today every lesson renders with the same canvas
+  // and no drop-cap.
   return (
-    <div className="prose prose-sm dark:prose-invert max-w-none">
-      <ReactMarkdown components={components}>{narrative}</ReactMarkdown>
+    <>
+      <LessonCanvas>
+        <ReactMarkdown components={components}>{narrative}</ReactMarkdown>
+      </LessonCanvas>
       <CitationModal
         open={active !== null}
         page={active?.page ?? 0}
@@ -300,7 +346,7 @@ export function ChapterRenderer({ narrative, sourceParagraphs }: ChapterRenderer
         paragraphs={activeParagraphs}
         onClose={handleClose}
       />
-    </div>
+    </>
   );
 }
 
@@ -333,18 +379,30 @@ function CitationButton({ page, paragraphIdx, paragraphEnd, onClick }: CitationB
     typeof userEnd === 'number' && userEnd !== userStart
       ? `View source: page ${page}, paragraphs ${userStart}–${userEnd}`
       : `View source: page ${page}, paragraph ${userStart}`;
-  const text =
-    typeof userEnd === 'number' && userEnd !== userStart
-      ? `[p.${page} ¶${userStart}-${userEnd}]`
-      : `[p.${page} ¶${userStart}]`;
+
+  // Sprint-Bv2 — superscript "footnote chip" style.
+  //
+  // Pre-Sprint-Bv2 the marker rendered as `[p.26 ¶1-6]` — readable but
+  // inline-code-shaped, which clobbered the reading rhythm. The UX-hybrid
+  // audit (§3.3) calls for a real footnote convention: a small,
+  // superscripted, citation-colored chip that gets out of the way until
+  // the reader wants it.
+  //
+  // We retain the page-and-paragraph numbers in the aria-label for
+  // assistive tech (the visible chip just shows `[p.26]` to stay tiny),
+  // and the click handler still opens the source paragraph(s) in the
+  // citation modal. Once Sprint C lands Radix Popover, this becomes
+  // hover-and-click; for now it stays click-to-open.
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      aria-label={label}
-      className="inline align-baseline mx-0.5 px-1 py-0 text-xs rounded bg-secondary text-secondary-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
-    >
-      {text}
-    </button>
+    <sup className="inline-block align-super">
+      <button
+        type="button"
+        onClick={handleClick}
+        aria-label={label}
+        className="mx-0.5 inline-flex items-center rounded-sm bg-citation-fade px-1 py-px font-mono text-[0.6875rem] font-medium leading-none text-citation transition-colors duration-snap ease-decelerate hover:bg-citation hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-citation"
+      >
+        p.{page}
+      </button>
+    </sup>
   );
 }

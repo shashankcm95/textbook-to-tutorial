@@ -82,17 +82,24 @@ export function ChapterLessons({
     return null;
   }
 
+  // Sprint-Bv2: brand-typography header + progress bar + nav buttons.
+  // The lesson title now uses Newsreader (display) at text-h3, lesson
+  // counter switches to mono with tabular-nums, progress bar uses brand
+  // indigo on paper-edge track, nav buttons inherit the brand button
+  // style from the home form. All centered to max-w-[36em] to match
+  // the LessonCanvas centering so the chrome sits on the same axis as
+  // the reading column.
   return (
-    <div className="space-y-4">
+    <div className="mx-auto max-w-[36em] space-y-stanza">
       {/* Lesson title — only shown when the chapter is actually paginated.
           Single-lesson fallback skips this to match the pre-Feature-A look. */}
       {!isSingle ? (
         <header className="flex items-baseline justify-between gap-3">
-          <h3 className="text-base font-medium text-foreground">
+          <h3 className="font-display text-h3 font-medium tracking-tight text-ink">
             Lesson {current.ordinal}: {current.title}
           </h3>
           <span
-            className="text-xs text-muted-foreground tabular-nums"
+            className="font-mono text-caption tabular-nums text-ink-faint"
             aria-label={`Lesson ${safeIdx + 1} of ${lessonCount}`}
           >
             {safeIdx + 1} / {lessonCount}
@@ -100,8 +107,7 @@ export function ChapterLessons({
         </header>
       ) : null}
 
-      {/* Progress bar — also paginated-only. ARIA progressbar role conveys
-          state to screen readers; the visible bar is decorative. */}
+      {/* Progress bar — paginated-only. */}
       {!isSingle ? (
         <div
           role="progressbar"
@@ -109,10 +115,10 @@ export function ChapterLessons({
           aria-valuemax={lessonCount}
           aria-valuenow={safeIdx + 1}
           aria-label="Lesson progress within chapter"
-          className="h-1 w-full overflow-hidden rounded-full bg-muted"
+          className="h-[3px] w-full overflow-hidden rounded-full bg-paper-edge"
         >
           <div
-            className="h-full bg-primary transition-[width] duration-200"
+            className="h-full rounded-full bg-brand transition-[width] duration-base ease-decelerate"
             style={{ width: `${((safeIdx + 1) / lessonCount) * 100}%` }}
           />
         </div>
@@ -129,26 +135,26 @@ export function ChapterLessons({
       {!isSingle ? (
         <nav
           aria-label="Lesson navigation"
-          className="flex items-center justify-between gap-3 border-t border-border pt-4"
+          className="flex items-center justify-between gap-3 border-t border-paper-edge pt-stanza"
         >
           <button
             type="button"
             onClick={goPrev}
             disabled={isFirst}
-            className="rounded border border-border bg-background px-3 py-1.5 text-xs font-medium hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40"
+            className="inline-flex items-center gap-1 rounded-md border border-paper-edge bg-paper px-3 py-1.5 font-sans text-ui font-medium text-ink-muted transition-colors duration-snap ease-decelerate hover:border-brand/40 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-paper-edge disabled:hover:text-ink-muted"
           >
-            ← Previous lesson
+            <span aria-hidden="true">←</span> Previous lesson
           </button>
           {!isLast ? (
             <button
               type="button"
               onClick={goNext}
-              className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+              className="inline-flex items-center gap-1 rounded-md bg-brand px-4 py-1.5 font-sans text-ui font-semibold text-white shadow-paper-sm transition-all duration-snap ease-decelerate hover:bg-brand-hover hover:shadow-paper active:translate-y-px focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
             >
-              Next lesson →
+              Next lesson <span aria-hidden="true">→</span>
             </button>
           ) : (
-            <span className="text-xs italic text-muted-foreground">Final lesson</span>
+            <span className="font-sans text-caption italic text-ink-faint">Final lesson</span>
           )}
         </nav>
       ) : null}

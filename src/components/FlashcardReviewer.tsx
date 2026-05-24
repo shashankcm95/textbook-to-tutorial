@@ -288,43 +288,127 @@ export function FlashcardReviewer({ cards, csrfToken, onGraded }: FlashcardRevie
         </div>
       </header>
 
-      {/* Card body */}
+      {/*
+        Sprint-Bv2.5: 3D-flip card body.
+        =================================
+
+        Replaces the pre-Bv2.5 instant front/back swap with a real card
+        flip — CSS `transform: rotateY(180deg)` on a `preserve-3d`
+        container, with `backface-visibility: hidden` so the off-screen
+        side stays invisible during the spin. The whole card is a
+        click-target; clicking flips it (matches the Readwise / Anki
+        muscle memory). The actual grade actions stay below the card so
+        flipping ≠ grading (UX persona's #9: "user can't claim recall
+        before seeing the answer").
+
+        Keyboard: Space / Enter flips when focused; ←/→ skip cards
+        (forward only — there's no rewind in a daily-batch SRS); G
+        marks Got it, M marks Missed (only when revealed).
+
+        Reduced-motion: the global @media rule in globals.css already
+        collapses transition-duration to 0.001ms when prefers-reduced-
+        motion is set; the flip becomes an instant swap (semantics
+        preserved, animation skipped).
+      */}
       <div
-        className="min-h-[8rem] rounded border border-border bg-background p-4"
-        role="region"
-        aria-labelledby="flashcard-side-label"
+        className="relative mt-1"
+        // 3D context — required by the children's preserve-3d.
+        style={{ perspective: '1200px' }}
       >
-        <div className="mb-2 text-xs uppercase tracking-wide text-muted-foreground" id="flashcard-side-label">
-          {showAnswer ? 'Back (answer)' : 'Front (prompt)'}
-        </div>
-        <div
-          className="text-base leading-relaxed whitespace-pre-wrap"
-          // Announce flips politely so screen-reader users hear the new side.
-          aria-live="polite"
+        <button
+          type="button"
+          onClick={handleFlip}
+          aria-pressed={showAnswer}
+          aria-label={
+            showAnswer
+              ? 'Showing answer. Click to flip back to the question.'
+              : 'Showing question. Click to flip and reveal the answer.'
+          }
+          onKeyDown={(e) => {
+            // G / M shortcuts only when the answer is visible
+            if (showAnswer && (e.key === 'g' || e.key === 'G')) {
+              e.preventDefault();
+              void handleGrade('correct');
+            } else if (showAnswer && (e.key === 'm' || e.key === 'M')) {
+              e.preventDefault();
+              void handleGrade('incorrect');
+            }
+          }}
+          className="group relative block min-h-[12rem] w-full cursor-pointer rounded-lg text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
         >
-          {showAnswer ? card.flashcard.back : card.flashcard.front}
-        </div>
+          <div
+            className="relative h-full w-full transition-transform duration-slow ease-spring"
+            style={{
+              transformStyle: 'preserve-3d',
+              transform: showAnswer ? 'rotateY(180deg)' : 'rotateY(0deg)',
+            }}
+          >
+            {/* FRONT face — question */}
+            <div
+              className="absolute inset-0 flex flex-col rounded-lg border border-paper-edge bg-paper px-6 py-5 shadow-paper group-hover:shadow-paper-lg"
+              style={{ backfaceVisibility: 'hidden', WebkitBackfaceVisibility: 'hidden' }}
+              aria-hidden={showAnswer}
+            >
+              <div className="mb-3 flex items-center justify-between">
+                <span className="font-mono text-micro uppercase tracking-wider text-ink-faint">
+                  Question
+                </span>
+                <span className="font-mono text-micro text-ink-faint">
+                  Click to flip
+                </span>
+              </div>
+              <div className="flex-1 font-serif text-body-lg leading-snug text-ink">
+                {card.flashcard.front}
+              </div>
+            </div>
+
+            {/* BACK face — answer */}
+            <div
+              className="absolute inset-0 flex flex-col rounded-lg border border-citation/40 bg-citation-fade px-6 py-5 shadow-paper group-hover:shadow-paper-lg"
+              style={{
+                backfaceVisibility: 'hidden',
+                WebkitBackfaceVisibility: 'hidden',
+                transform: 'rotateY(180deg)',
+              }}
+              aria-hidden={!showAnswer}
+            >
+              <div className="mb-3 flex items-center justify-between">
+                <span className="font-mono text-micro uppercase tracking-wider text-citation">
+                  Answer
+                </span>
+                <span className="font-mono text-micro text-ink-faint">
+                  Press G / M to grade
+                </span>
+              </div>
+              <div className="flex-1 font-serif text-body leading-relaxed text-ink">
+                {card.flashcard.back}
+              </div>
+            </div>
+          </div>
+        </button>
       </div>
 
-      {/* Actions */}
-      <div className="mt-4 flex flex-wrap gap-2">
+      {/* Screen-reader live region — announces the new side after a flip
+          for AT users (visual users see the spin). Hidden visually. */}
+      <p className="sr-only" aria-live="polite">
+        {showAnswer
+          ? `Answer: ${card.flashcard.back}`
+          : `Question: ${card.flashcard.front}`}
+      </p>
+
+      {/* Actions — placed BELOW the card so flipping doesn't double
+          as grading. Pre-Bv2.5 "I knew it" + "Show answer" let the
+          user claim recall before seeing the answer; the new flow is
+          flip → see → grade. */}
+      <div className="mt-5 flex flex-wrap gap-2">
         {!showAnswer ? (
-          <>
-            <ActionButton
-              variant="primary"
-              onClick={() => void handleGrade('correct')}
-              disabled={submit.status === 'submitting'}
-            >
-              I knew it
-            </ActionButton>
-            <ActionButton
-              variant="secondary"
-              onClick={handleFlip}
-              disabled={submit.status === 'submitting'}
-            >
-              Show answer
-            </ActionButton>
-          </>
+          <ActionButton
+            variant="secondary"
+            onClick={handleFlip}
+            disabled={submit.status === 'submitting'}
+          >
+            Show answer
+          </ActionButton>
         ) : (
           <>
             <ActionButton
@@ -332,14 +416,14 @@ export function FlashcardReviewer({ cards, csrfToken, onGraded }: FlashcardRevie
               onClick={() => void handleGrade('correct')}
               disabled={submit.status === 'submitting'}
             >
-              Got it
+              Got it <kbd className="ml-1 font-mono text-[10px] opacity-60">G</kbd>
             </ActionButton>
             <ActionButton
               variant="destructive"
               onClick={() => void handleGrade('incorrect')}
               disabled={submit.status === 'submitting'}
             >
-              Missed
+              Missed <kbd className="ml-1 font-mono text-[10px] opacity-60">M</kbd>
             </ActionButton>
           </>
         )}
