@@ -76,7 +76,7 @@ function makeVoiceProfile(): VoiceProfile {
     model: 'gpt-4o-mini',
     extraction_cost_usd: 0.0003,
     sample_size: 10,
-    sampler_version: 'uniform-body-v1',
+    sampler_version: 'weighted-rhetorical-v1',
     tone_summary: 'UNIQUE-TONE-MARKER-XYZ123 dry pragmatic register.',
     signature_moves: [
       { name: 'Question opener', description: 'Opens with a question.' },

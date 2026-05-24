@@ -205,7 +205,7 @@ const VOICE_PROFILE: VoiceProfile = {
   model: 'gpt-4o-mini',
   extraction_cost_usd: 0.0003,
   sample_size: 10,
-  sampler_version: 'uniform-body-v1',
+  sampler_version: 'weighted-rhetorical-v1',
   tone_summary: 'dry pragmatic register',
   signature_moves: [],
   example_phrases: [],

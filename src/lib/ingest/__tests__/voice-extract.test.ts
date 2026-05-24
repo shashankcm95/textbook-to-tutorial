@@ -1,17 +1,29 @@
 // src/lib/ingest/__tests__/voice-extract.test.ts
 //
-// Unit tests for the voice-profile extractor (Feature B', Wave 1).
+// Unit tests for the voice-profile extractor (Feature B').
+//
+// T3.5 — sampler v1 → v2 (weighted-rhetorical-v1) refresh:
+//   - weighParagraph (pure, deterministic) gets explicit per-rule tests.
+//   - weightedSample (Algorithm A-Res; statistical) gets a high-weight-bias
+//     distribution test over many trials, and a Math.random-mocked
+//     deterministic-ordering test.
+//   - sampleParagraphs no longer makes claims about specific indices
+//     (sampling is randomized); we assert structural invariants instead
+//     (size, source-order, no duplicates, deterministic under mocked rng).
+//   - sampler_version literal updated to 'weighted-rhetorical-v1' (canary).
 //
 // Coverage:
-//   - sampleParagraphs (pure): exact-10, <10, >10 (uniform stride), 0-empty
+//   - sampleParagraphs: exact-10, <10, >10 (weighted), 0-empty, source-order
+//   - weighParagraph: each rule in isolation + combined
+//   - weightedSample: empty/<=k passthrough, weight-biased distribution
 //   - buildVoiceUserPrompt: ref shape + count marker
 //   - extractVoiceProfile: happy path with mocked OpenAI (cost computed,
 //     all fields populated, schema_version + sampler_version stamped)
 //   - VoiceProfileParseError: malformed JSON triggers it; withRetry-driven
-//     retry semantics observed (parse-retry budget = 1, so 2 total attempts)
+//     retry semantics observed
 //   - Model + prompt invariants asserted via __TEST_ONLY (no string drift)
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { SourceParagraph } from '@/lib/types';
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -35,6 +47,8 @@ import {
   extractVoiceProfile,
   sampleParagraphs,
   buildVoiceUserPrompt,
+  weighParagraph,
+  weightedSample,
   VoiceProfileParseError,
   __TEST_ONLY,
   type VoiceProfile,
@@ -91,10 +105,19 @@ function buildOpenAIResponseFromContent(content: string, promptTokens = 1200, co
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// sampleParagraphs — pure sampling logic
+// sampleParagraphs — weighted reservoir sampling (T3.5)
+//
+// Specific-index assertions are intentionally absent: v2 is randomized. We
+// pin the structural invariants (count, source-order, no duplicates, dedup
+// passthrough on small inputs) and rely on the dedicated weighParagraph +
+// weightedSample tests below for the algorithm-level guarantees.
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('sampleParagraphs', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('returns empty array when no paragraphs', () => {
     expect(sampleParagraphs([])).toEqual([]);
   });
@@ -106,45 +129,220 @@ describe('sampleParagraphs', () => {
     expect(out.length).toBe(5);
   });
 
-  it('returns exactly 10 when input is exactly 10', () => {
+  it('returns exactly 10 when input is exactly 10 (passthrough branch)', () => {
     const ten = makeNParagraphs(10);
     const out = sampleParagraphs(ten);
-    // length <= SAMPLE_SIZE branch returns a copy of the full list
     expect(out).toEqual(ten);
     expect(out.length).toBe(10);
   });
 
-  it('samples 10 with uniform stride when input is much larger', () => {
+  it('returns exactly SAMPLE_SIZE (10) when input is much larger', () => {
     const hundred = makeNParagraphs(100);
     const out = sampleParagraphs(hundred);
     expect(out.length).toBe(10);
-    // stride = floor(100 / 10) = 10; indices 0,10,20,...,90
-    for (let i = 0; i < 10; i++) {
-      // We embedded the index in the text as `para-${i}-content`
-      expect(out[i]?.text).toBe(`para-${i * 10}-content`);
+  });
+
+  it('returns paragraphs in source order (page, then paragraphIdx)', () => {
+    const fifty = makeNParagraphs(50);
+    const out = sampleParagraphs(fifty);
+    for (let i = 1; i < out.length; i++) {
+      const prev = out[i - 1]!;
+      const cur = out[i]!;
+      const prevKey = prev.page * 1000 + prev.paragraphIdx;
+      const curKey = cur.page * 1000 + cur.paragraphIdx;
+      expect(curKey).toBeGreaterThan(prevKey);
     }
   });
 
-  it('handles non-divisible sizes (stride = floor(length/10))', () => {
-    const fortyTwo = makeNParagraphs(42);
-    const out = sampleParagraphs(fortyTwo);
-    expect(out.length).toBe(10);
-    // stride = floor(42 / 10) = 4; indices 0,4,8,...,36
-    for (let i = 0; i < 10; i++) {
-      expect(out[i]?.text).toBe(`para-${i * 4}-content`);
-    }
+  it('does not duplicate any input paragraph in the sample', () => {
+    const fifty = makeNParagraphs(50);
+    const out = sampleParagraphs(fifty);
+    const seen = new Set(out.map((p) => `${p.page}:${p.paragraphIdx}`));
+    expect(seen.size).toBe(out.length);
   });
 
   it('preserves page + paragraphIdx for ref reconstruction', () => {
     const twenty = makeNParagraphs(20);
     const out = sampleParagraphs(twenty);
-    // First sample is index 0 → page 1, paragraphIdx 0
-    expect(out[0]).toMatchObject({ page: 1, paragraphIdx: 0 });
-    // Each entry should have a numeric page + paragraphIdx
     for (const p of out) {
       expect(typeof p.page).toBe('number');
       expect(typeof p.paragraphIdx).toBe('number');
     }
+  });
+
+  it('is deterministic when Math.random is mocked (regression canary for rng surface)', () => {
+    // Pin Math.random to a constant so two consecutive runs produce the
+    // same draw. This protects against future refactors that swap in a
+    // private rng without honoring Math.random.
+    const fifty = makeNParagraphs(50);
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const a = sampleParagraphs(fifty);
+    const b = sampleParagraphs(fifty);
+    expect(a.map((p) => `${p.page}:${p.paragraphIdx}`)).toEqual(
+      b.map((p) => `${p.page}:${p.paragraphIdx}`),
+    );
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// weighParagraph — pure, deterministic weight function (T3.5)
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('weighParagraph', () => {
+  it('returns 1.0 (baseline) for a plain mid-page paragraph with no markers', () => {
+    // paragraphIdx >= 3 escapes the chapter-opening boost; long with period
+    // escapes epigraph; no rhetorical markers in the text.
+    const p = makeParagraph(5, 4, 'This sentence is plain and contains zero special markers.');
+    expect(weighParagraph(p)).toBe(1.0);
+  });
+
+  it('applies the chapter-opening boost (3×) for paragraphIdx <= 2', () => {
+    for (const idx of [0, 1, 2]) {
+      const p = makeParagraph(
+        2,
+        idx,
+        // Plain text, no markers — long enough to escape epigraph rule.
+        'A reasonably long sentence that ends with a period so the epigraph rule does not fire here at all today.',
+      );
+      // paragraphIdx === 0 also fires epigraph? No — text ends with period.
+      expect(weighParagraph(p)).toBe(__TEST_ONLY.WEIGHT_CHAPTER_OPENING);
+    }
+  });
+
+  it('applies the rhetorical-marker boost (2×) for "but" / "however" / em-dash / forward-pointer', () => {
+    const cases: Array<[string, string]> = [
+      ['but', 'It seemed simple, but it never is.'],
+      ['however', 'There is a caveat, however, worth naming.'],
+      ['yet', 'We have not solved it yet in any deployment.'],
+      ['em-dash', 'It works fine — until the leap second arrives unannounced.'],
+      ['en-dash', 'Range 1990–2020 was the easy era for clock drift.'],
+      ['forward-pointer (we will)', 'We will return to this in section four.'],
+      ['forward-pointer (next chapter)', 'In the next chapter we wire up the consensus protocol.'],
+    ];
+    for (const [, text] of cases) {
+      const p = makeParagraph(5, 5, text); // mid-page → no chapter-opening
+      expect(weighParagraph(p)).toBe(__TEST_ONLY.WEIGHT_RHETORICAL_MARKER);
+    }
+  });
+
+  it('applies the epigraph boost (1.5×) for short, top-of-page, no-terminal-period paragraphs', () => {
+    // <40 words, paragraphIdx 0, no terminal period. Avoid em-dash / en-dash
+    // and any rhetorical-marker word so we isolate the epigraph boost (and
+    // the unavoidable chapter-opening boost at idx 0).
+    const epigraph = makeParagraph(3, 0, '"Time is what keeps everything from happening at once"');
+    // paragraphIdx 0 also fires chapter-opening (idx <= 2) so weight is
+    // chapter-opening × epigraph.
+    const expected = __TEST_ONLY.WEIGHT_CHAPTER_OPENING * __TEST_ONLY.WEIGHT_EPIGRAPH;
+    expect(weighParagraph(epigraph)).toBe(expected);
+  });
+
+  it('combines all three rules multiplicatively (max 3 × 2 × 1.5 = 9)', () => {
+    const allThree = makeParagraph(
+      4,
+      0,
+      // idx 0 (chapter-opening + epigraph candidate), contains em-dash
+      // (rhetorical), short, no terminal period.
+      'It is — at best — partial',
+    );
+    const expected =
+      __TEST_ONLY.WEIGHT_CHAPTER_OPENING *
+      __TEST_ONLY.WEIGHT_RHETORICAL_MARKER *
+      __TEST_ONLY.WEIGHT_EPIGRAPH;
+    expect(weighParagraph(allThree)).toBe(expected);
+  });
+
+  it('does not fire epigraph for a long paragraph at paragraphIdx 0', () => {
+    const longOpener = makeParagraph(
+      1,
+      0,
+      Array.from({ length: 60 }, (_, i) => `word${i}`).join(' '),
+    );
+    // chapter-opening fires; epigraph does NOT (>= 40 words).
+    expect(weighParagraph(longOpener)).toBe(__TEST_ONLY.WEIGHT_CHAPTER_OPENING);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// weightedSample — Algorithm A-Res (T3.5)
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('weightedSample', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns [] for empty input', () => {
+    expect(weightedSample([], 5)).toEqual([]);
+  });
+
+  it('returns [] when k <= 0', () => {
+    expect(weightedSample([{ item: 'a', weight: 1 }], 0)).toEqual([]);
+  });
+
+  it('returns all items unchanged when items.length <= k', () => {
+    const items = [
+      { item: 'a', weight: 1 },
+      { item: 'b', weight: 5 },
+      { item: 'c', weight: 0.1 },
+    ];
+    expect(weightedSample(items, 10)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('biases selection toward higher-weight items across many trials', () => {
+    // Items: one high-weight target ("hot") at 100×; rest baseline 1×.
+    // Pick k=1 per trial. Over 1000 trials, "hot" should win the lion's
+    // share. With weight 100 vs ten 1's (total 110), expected ~91% hits.
+    const trials = 1000;
+    const items = [
+      { item: 'hot', weight: 100 },
+      ...Array.from({ length: 10 }, (_, i) => ({ item: `cold-${i}`, weight: 1 })),
+    ];
+    let hotHits = 0;
+    for (let i = 0; i < trials; i++) {
+      const drawn = weightedSample(items, 1);
+      if (drawn[0] === 'hot') hotHits++;
+    }
+    // Generous lower bound: well above the baseline ~9% (1/11) a uniform
+    // sampler would produce, leaving room for natural variance.
+    expect(hotHits).toBeGreaterThan(700);
+  });
+
+  it('is deterministic when Math.random is mocked to a fixed value', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const items = [
+      { item: 'a', weight: 1 },
+      { item: 'b', weight: 4 },
+      { item: 'c', weight: 9 },
+      { item: 'd', weight: 16 },
+    ];
+    const a = weightedSample(items, 2);
+    const b = weightedSample(items, 2);
+    expect(a).toEqual(b);
+    // With identical U=0.5 across all items, ordering is purely by weight:
+    // larger weight → smaller exponent (1/w) → larger 0.5^(1/w) → ranked first.
+    // Expect top 2 by weight: 'd' then 'c'.
+    expect(new Set(a)).toEqual(new Set(['c', 'd']));
+  });
+
+  it('does not duplicate items in the sample', () => {
+    const items = Array.from({ length: 20 }, (_, i) => ({
+      item: `i-${i}`,
+      weight: 1 + i,
+    }));
+    const drawn = weightedSample(items, 5);
+    expect(new Set(drawn).size).toBe(drawn.length);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// SAMPLER_VERSION regression canary (T3.5)
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('SAMPLER_VERSION', () => {
+  it('is "weighted-rhetorical-v1" (T3.5 bump from uniform-body-v1)', () => {
+    // Load-bearing for downstream S3 cache invalidation; any drift here
+    // means the cache will silently keep returning v1-sampled profiles.
+    expect(__TEST_ONLY.SAMPLER_VERSION).toBe('weighted-rhetorical-v1');
   });
 });
 
@@ -197,7 +395,7 @@ describe('extractVoiceProfile', () => {
     // Stamped fields
     expect(profile.schema_version).toBe(1);
     expect(profile.model).toBe('gpt-4o-mini');
-    expect(profile.sampler_version).toBe('uniform-body-v1');
+    expect(profile.sampler_version).toBe('weighted-rhetorical-v1');
     expect(profile.sample_size).toBe(10); // 50 > SAMPLE_SIZE → 10 sampled
     expect(typeof profile.extracted_at).toBe('string');
     // ISO timestamp shape
