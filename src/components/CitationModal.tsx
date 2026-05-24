@@ -36,20 +36,27 @@ export interface CitationModalProps {
   open: boolean;
   /** The page (1-based) the citation points at. Used for the header label. */
   page: number;
-  /** The paragraph index (0-based) within that page. */
+  /** The paragraph index (0-based) within that page (start of range). */
   paragraphIdx: number;
+  /** Inclusive end-paragraph index for range citations; undefined for single. */
+  paragraphEnd?: number;
   /**
-   * The resolved source paragraph, or null if not yet loaded / not found.
-   * Parent is responsible for looking up the SourceParagraph from
-   * `chapter.source_paragraphs_json`. We render-only here (SRP).
+   * Legacy single-paragraph slot. Kept for back-compat with callers that
+   * resolve one paragraph; new callers should populate `paragraphs` instead.
    */
   paragraph: SourceParagraph | null;
+  /**
+   * Resolved source paragraphs covered by this citation. For a single-form
+   * citation this has 0 or 1 entries; for a range it can have many.
+   * Render-only — parent does the resolution (SRP).
+   */
+  paragraphs?: SourceParagraph[];
   /** Called when the user dismisses (Escape, backdrop click, X button). */
   onClose: () => void;
 }
 
 export function CitationModal(props: CitationModalProps) {
-  const { open, page, paragraphIdx, paragraph, onClose } = props;
+  const { open, page, paragraphIdx, paragraphEnd, paragraph, paragraphs, onClose } = props;
   const dialogRef = useRef<HTMLDialogElement | null>(null);
 
   // Sync the React `open` prop with the imperative `<dialog>` API.
@@ -86,7 +93,23 @@ export function CitationModal(props: CitationModalProps) {
   // Page is human-readable (1-based); paragraph is 0-based internally but we
   // surface it as 1-based to match how a user counts ("paragraph 3 on page 42"
   // ≠ "the fourth paragraph"). Keep the heading natural.
-  const userParagraphNum = paragraphIdx + 1;
+  const userStartNum = paragraphIdx + 1;
+  const userEndNum =
+    typeof paragraphEnd === 'number' ? paragraphEnd + 1 : undefined;
+  const headerSuffix =
+    typeof userEndNum === 'number' && userEndNum !== userStartNum
+      ? `paragraphs ${userStartNum}–${userEndNum}`
+      : `paragraph ${userStartNum}`;
+
+  // Prefer the multi-paragraph list when provided; fall back to the legacy
+  // single-paragraph slot for older callers (no caller is left, but the
+  // back-compat shape costs nothing).
+  const resolvedParagraphs: SourceParagraph[] =
+    paragraphs && paragraphs.length > 0
+      ? paragraphs
+      : paragraph !== null
+        ? [paragraph]
+        : [];
 
   return (
     <dialog
@@ -97,7 +120,7 @@ export function CitationModal(props: CitationModalProps) {
     >
       <div className="flex items-center justify-between border-b border-border px-5 py-3">
         <h2 id="citation-modal-title" className="text-sm font-semibold">
-          Source: page {page}, paragraph {userParagraphNum}
+          Source: page {page}, {headerSuffix}
         </h2>
         <button
           type="button"
@@ -122,16 +145,26 @@ export function CitationModal(props: CitationModalProps) {
           </svg>
         </button>
       </div>
-      <div className="px-5 py-4 max-h-[60vh] overflow-y-auto">
-        {paragraph === null ? (
+      <div className="px-5 py-4 max-h-[60vh] overflow-y-auto space-y-3">
+        {resolvedParagraphs.length === 0 ? (
           <p className="text-sm italic text-muted-foreground">
             Source paragraph not found in this chapter&apos;s index. The
             reference may be from a related chapter — check the chapter list.
           </p>
         ) : (
-          <blockquote className="text-sm leading-relaxed whitespace-pre-wrap">
-            {paragraph.text}
-          </blockquote>
+          resolvedParagraphs.map((p, i) => (
+            <blockquote
+              key={`${p.page}-${p.paragraphIdx}-${i}`}
+              className="text-sm leading-relaxed whitespace-pre-wrap border-l-2 border-border pl-3"
+            >
+              {resolvedParagraphs.length > 1 ? (
+                <span className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
+                  ¶{p.paragraphIdx + 1}
+                </span>
+              ) : null}
+              {p.text}
+            </blockquote>
+          ))
         )}
       </div>
     </dialog>

@@ -46,7 +46,7 @@
  *     prose would corrupt the UI; false negatives just leave the ref as text.
  */
 
-import { useMemo, useState, useCallback } from 'react';
+import React, { useMemo, useState, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import type { SourceParagraph } from '@/lib/types';
@@ -57,17 +57,37 @@ import { CitationModal } from './CitationModal';
 // ───────────────────────────────────────────────────────────────────────────
 
 /**
- * `[ref:pageN:paragraphM]` — captures page and paragraph indices.
- * Groups: 1 = page, 2 = paragraph.
+ * `[ref:pageN:paragraphM]` (single) OR `[ref:pageN:paragraphM-K]` (range) —
+ * captures page and paragraph indices.
+ *
+ * Groups: 1 = page, 2 = paragraphStart, 3 = paragraphEnd (optional).
+ *
+ * Why two shapes:
+ *   - The LLM emits BOTH single-paragraph (`paragraph2`) and range
+ *     (`paragraph0-5`) citations depending on how much of the source it
+ *     paraphrased into one inline reference. Empirically: DDIA chapter
+ *     summaries cite multi-paragraph ranges; specific-claim citations
+ *     cite single paragraphs. The Sprint-A walkthrough capture showed
+ *     range citations as plain text leaking into the UI — the original
+ *     single-only regex never matched them.
+ *
+ * Behavior:
+ *   - If the range form fires, `paragraphIdx` = start; `paragraphEnd` = end.
+ *     CitationButton renders `[p.26 ¶1-6]`; CitationModal shows all
+ *     paragraphs in the range when resolvable.
+ *   - If the single form fires, `paragraphEnd` = undefined.
+ *
  * Global flag for .matchAll; case-insensitive for robustness against LLM
  * casing drift (`Ref` vs `ref`).
  */
-const CITATION_RE = /\[ref:page(\d+):paragraph(\d+)\]/gi;
+const CITATION_RE = /\[ref:page(\d+):paragraph(\d+)(?:-(\d+))?\]/gi;
 
 interface CitationToken {
   kind: 'citation';
   page: number;
   paragraphIdx: number;
+  /** End of the paragraph range (inclusive) when the marker is a range. */
+  paragraphEnd?: number;
   /** Original raw text matched, for key stability. */
   raw: string;
 }
@@ -102,17 +122,23 @@ export function tokenizeCitations(input: string): Token[] {
     if (matchStart > lastIndex) {
       tokens.push({ kind: 'text', text: input.slice(lastIndex, matchStart) });
     }
-    // match[1] / match[2] are page and paragraph capture groups; for a
-    // successful global-flag match they MUST be defined. Defensive parse
-    // anyway — Number('') is 0, /\d+/ rules out '', so this is paranoia.
+    // match[1] / match[2] are page and paragraph-start; match[3] is the
+    // optional range-end. For a successful global-flag match groups 1+2
+    // MUST be defined; group 3 is undefined for single-paragraph form.
     const pageStr = match[1] ?? '';
     const paraStr = match[2] ?? '';
+    const paraEndStr = match[3];
     const page = Number.parseInt(pageStr, 10);
     const paragraphIdx = Number.parseInt(paraStr, 10);
+    const paragraphEnd =
+      typeof paraEndStr === 'string' ? Number.parseInt(paraEndStr, 10) : undefined;
     tokens.push({
       kind: 'citation',
       page,
       paragraphIdx,
+      ...(typeof paragraphEnd === 'number' && !Number.isNaN(paragraphEnd)
+        ? { paragraphEnd }
+        : {}),
       raw: match[0],
     });
     lastIndex = matchStart + match[0].length;
@@ -141,6 +167,8 @@ export interface ChapterRendererProps {
 interface ActiveCitation {
   page: number;
   paragraphIdx: number;
+  /** Inclusive end-paragraph for range citations; undefined for single. */
+  paragraphEnd?: number;
 }
 
 export function ChapterRenderer({ narrative, sourceParagraphs }: ChapterRendererProps) {
@@ -160,8 +188,12 @@ export function ChapterRenderer({ narrative, sourceParagraphs }: ChapterRenderer
   }, [sourceParagraphs]);
 
   const handleCitationClick = useCallback(
-    (page: number, paragraphIdx: number): void => {
-      setActive({ page, paragraphIdx });
+    (page: number, paragraphIdx: number, paragraphEnd?: number): void => {
+      setActive(
+        typeof paragraphEnd === 'number'
+          ? { page, paragraphIdx, paragraphEnd }
+          : { page, paragraphIdx },
+      );
     },
     [],
   );
@@ -171,69 +203,90 @@ export function ChapterRenderer({ narrative, sourceParagraphs }: ChapterRenderer
   }, []);
 
   /**
-   * react-markdown components map. We override the renderers that produce
-   * text children — `p`, `li`, `h1-h6`, `em`, `strong`, etc — to walk their
-   * children and tokenize any string children.
+   * react-markdown v9 components map.
    *
-   * Rather than override every text-producing element individually, we use
-   * the `components.text` slot which fires for every plain text node. This
-   * keeps the override surface small and behaviorally correct.
+   * IMPORTANT: react-markdown v9 removed the `text` slot that earlier versions
+   * exposed (see https://github.com/remarkjs/react-markdown/issues/783). Plain
+   * text nodes inside paragraphs/headings/list items don't pass through any
+   * customizable hook anymore — they render directly as strings. The previous
+   * code attempted to override `text` and silently no-op'd; combined with the
+   * regex that didn't accept range syntax (`paragraph0-5`), citation buttons
+   * never appeared on any narrative in production.
    *
-   * Note: react-markdown v9 calls this with a node object whose `.value`
-   * carries the text. Older versions passed `children` directly. We support
-   * the v9 shape (per package.json `react-markdown: 9.0.1`).
+   * The right approach in v9: override the block elements that carry text
+   * (p / li / heading levels) and recursively walk their children, tokenizing
+   * any string leaves into our CitationButton spans. Inline elements (em,
+   * strong, code, a) get the same treatment so citations inside emphasis or
+   * links still resolve.
+   *
+   * Why not preprocess the markdown string before handing to react-markdown:
+   *   keeps the regex out of the markdown grammar layer — links / code spans
+   *   / fenced blocks that happen to contain a `[ref:...]` token (e.g., a
+   *   code example) would otherwise be incorrectly tokenized. Walking the
+   *   rendered tree is safer: code blocks bypass our walker.
    */
-  const components: Components = useMemo(
-    () => ({
-      // The text node renderer. In react-markdown v9 plain text nodes pass
-      // through this slot. We intercept and tokenize.
-      // The type `Components['text']` doesn't expose a clean way to pull
-      // string content, so we cast via the `node.value` field documented
-      // in the hast spec (which react-markdown's mdast→hast layer surfaces).
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      text: (props: any) => {
-        // props.children is the text content for v9; node.value is the hast value.
-        const raw =
-          typeof props.children === 'string'
-            ? props.children
-            : typeof props?.node?.value === 'string'
-              ? props.node.value
-              : '';
-        if (raw === '') return null;
-        const tokens = tokenizeCitations(raw);
-        if (tokens.length === 1 && tokens[0]?.kind === 'text') {
-          // Common case — no citations in this text node. Return as-is to
-          // avoid the wrapping <>...</> fragment which would be wasted work.
-          return raw;
+  const tokenizeChildren = useCallback(
+    (children: React.ReactNode): React.ReactNode => {
+      const arr = React.Children.toArray(children);
+      return arr.map((child, i) => {
+        if (typeof child === 'string') {
+          const tokens = tokenizeCitations(child);
+          if (tokens.length === 1 && tokens[0]?.kind === 'text') {
+            return child;
+          }
+          return (
+            <React.Fragment key={`tk-${i}`}>
+              {tokens.map((tok, j) =>
+                tok.kind === 'text' ? (
+                  <React.Fragment key={`t-${i}-${j}`}>{tok.text}</React.Fragment>
+                ) : (
+                  <CitationButton
+                    key={`c-${i}-${j}-${tok.raw}`}
+                    page={tok.page}
+                    paragraphIdx={tok.paragraphIdx}
+                    paragraphEnd={tok.paragraphEnd}
+                    onClick={handleCitationClick}
+                  />
+                ),
+              )}
+            </React.Fragment>
+          );
         }
-        return (
-          <>
-            {tokens.map((tok, i) =>
-              tok.kind === 'text' ? (
-                // Position-stable key — react-markdown re-renders the same
-                // text node on streaming updates; position within the split
-                // is stable for a given input string.
-                <span key={`t-${i}`}>{tok.text}</span>
-              ) : (
-                <CitationButton
-                  key={`c-${i}-${tok.raw}`}
-                  page={tok.page}
-                  paragraphIdx={tok.paragraphIdx}
-                  onClick={handleCitationClick}
-                />
-              ),
-            )}
-          </>
-        );
-      },
-    }),
+        return child;
+      });
+    },
     [handleCitationClick],
   );
 
-  const activeParagraph =
-    active === null
-      ? null
-      : sourceIndex.get(`${active.page}:${active.paragraphIdx}`) ?? null;
+  const components: Components = useMemo(
+    () => ({
+      p: ({ children, ...rest }) => <p {...rest}>{tokenizeChildren(children)}</p>,
+      li: ({ children, ...rest }) => <li {...rest}>{tokenizeChildren(children)}</li>,
+      h1: ({ children, ...rest }) => <h1 {...rest}>{tokenizeChildren(children)}</h1>,
+      h2: ({ children, ...rest }) => <h2 {...rest}>{tokenizeChildren(children)}</h2>,
+      h3: ({ children, ...rest }) => <h3 {...rest}>{tokenizeChildren(children)}</h3>,
+      h4: ({ children, ...rest }) => <h4 {...rest}>{tokenizeChildren(children)}</h4>,
+      h5: ({ children, ...rest }) => <h5 {...rest}>{tokenizeChildren(children)}</h5>,
+      h6: ({ children, ...rest }) => <h6 {...rest}>{tokenizeChildren(children)}</h6>,
+      em: ({ children, ...rest }) => <em {...rest}>{tokenizeChildren(children)}</em>,
+      strong: ({ children, ...rest }) => <strong {...rest}>{tokenizeChildren(children)}</strong>,
+    }),
+    [tokenizeChildren],
+  );
+
+  // Resolve the active citation to one paragraph (single) or many
+  // (range). Range is inclusive on both ends. Missing paragraphs are
+  // dropped silently — the modal renders only what's resolvable.
+  const activeParagraphs: SourceParagraph[] = useMemo(() => {
+    if (active === null) return [];
+    const end = active.paragraphEnd ?? active.paragraphIdx;
+    const result: SourceParagraph[] = [];
+    for (let i = active.paragraphIdx; i <= end; i++) {
+      const p = sourceIndex.get(`${active.page}:${i}`);
+      if (p) result.push(p);
+    }
+    return result;
+  }, [active, sourceIndex]);
 
   return (
     <div className="prose prose-sm dark:prose-invert max-w-none">
@@ -242,7 +295,9 @@ export function ChapterRenderer({ narrative, sourceParagraphs }: ChapterRenderer
         open={active !== null}
         page={active?.page ?? 0}
         paragraphIdx={active?.paragraphIdx ?? 0}
-        paragraph={activeParagraph}
+        paragraphEnd={active?.paragraphEnd}
+        paragraph={activeParagraphs[0] ?? null}
+        paragraphs={activeParagraphs}
         onClose={handleClose}
       />
     </div>
@@ -256,26 +311,40 @@ export function ChapterRenderer({ narrative, sourceParagraphs }: ChapterRenderer
 interface CitationButtonProps {
   page: number;
   paragraphIdx: number;
-  onClick: (page: number, paragraphIdx: number) => void;
+  paragraphEnd?: number;
+  onClick: (page: number, paragraphIdx: number, paragraphEnd?: number) => void;
 }
 
-function CitationButton({ page, paragraphIdx, onClick }: CitationButtonProps) {
+function CitationButton({ page, paragraphIdx, paragraphEnd, onClick }: CitationButtonProps) {
   const handleClick = useCallback((): void => {
-    onClick(page, paragraphIdx);
-  }, [onClick, page, paragraphIdx]);
+    onClick(page, paragraphIdx, paragraphEnd);
+  }, [onClick, page, paragraphIdx, paragraphEnd]);
 
-  // Display: `[p.151 ¶3]` — compact, scannable, conveys "page 151, paragraph 3"
-  // without consuming inline-flow real estate. The user-facing paragraph num
-  // is 1-based (+1) to match CitationModal's heading convention.
-  const userParaNum = paragraphIdx + 1;
+  // Display:
+  //   single: `[p.151 ¶3]`
+  //   range:  `[p.26 ¶1-6]`
+  // Compact, scannable, conveys page + paragraph(s) without consuming much
+  // inline-flow real estate. User-facing paragraph nums are 1-based (+1) to
+  // match CitationModal's heading convention.
+  const userStart = paragraphIdx + 1;
+  const userEnd =
+    typeof paragraphEnd === 'number' ? paragraphEnd + 1 : undefined;
+  const label =
+    typeof userEnd === 'number' && userEnd !== userStart
+      ? `View source: page ${page}, paragraphs ${userStart}–${userEnd}`
+      : `View source: page ${page}, paragraph ${userStart}`;
+  const text =
+    typeof userEnd === 'number' && userEnd !== userStart
+      ? `[p.${page} ¶${userStart}-${userEnd}]`
+      : `[p.${page} ¶${userStart}]`;
   return (
     <button
       type="button"
       onClick={handleClick}
-      aria-label={`View source: page ${page}, paragraph ${userParaNum}`}
+      aria-label={label}
       className="inline align-baseline mx-0.5 px-1 py-0 text-xs rounded bg-secondary text-secondary-foreground hover:bg-accent hover:text-accent-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
     >
-      [p.{page} ¶{userParaNum}]
+      {text}
     </button>
   );
 }

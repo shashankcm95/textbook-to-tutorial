@@ -78,10 +78,25 @@ export interface CostChipProps {
   costUsdLive?: number;
 }
 
-/** Server response shape from /api/tutorials/${id}/cost. */
+/**
+ * Server response shape from /api/tutorials/${id}/cost.
+ *
+ * Persona-Sprint-A T1.4 fix: previous code expected `costUsd` / `costCapUsd`
+ * but the server returns `spentUsd` / `capUsd` (see CostResponse in
+ * src/app/api/tutorials/[id]/cost/route.ts:48-55). The mismatch silently
+ * fell through to defaults of 0/0 → chip rendered "$0.00 / $0.00 (0%)"
+ * across every revisit. Aligning the client-side keys to the server contract.
+ *
+ * (We keep the legacy aliases as optional fields so a transient deploy where
+ * client + server are out-of-sync still degrades to the old behavior rather
+ * than crashing the chip.)
+ */
 interface CostPollResponse {
-  costUsd: number;
-  costCapUsd: number;
+  spentUsd: number;
+  capUsd: number;
+  /** Optional legacy keys — accepted for forward/backward compat. */
+  costUsd?: number;
+  costCapUsd?: number;
 }
 
 interface CostState {
@@ -139,17 +154,24 @@ export function CostChip({ tutorialId, costUsdLive }: CostChipProps) {
         if (disposed) return;
         // Defensive parse — server SHOULD return the shape but defending
         // against partial deploys / proxy errors that munge the body.
-        const costUsd =
-          typeof data.costUsd === 'number' && Number.isFinite(data.costUsd)
-            ? data.costUsd
-            : 0;
-        const costCapUsd =
-          typeof data.costCapUsd === 'number' &&
-          Number.isFinite(data.costCapUsd) &&
-          data.costCapUsd > 0
-            ? data.costCapUsd
-            : 0;
-        setState({ costUsd, costCapUsd, loading: false, error: null });
+        //
+        // T1.4: accept both `spentUsd`/`capUsd` (current contract) and the
+        // legacy `costUsd`/`costCapUsd` aliases. Spent first; legacy second.
+        const spentRaw =
+          typeof data.spentUsd === 'number' && Number.isFinite(data.spentUsd)
+            ? data.spentUsd
+            : typeof data.costUsd === 'number' && Number.isFinite(data.costUsd)
+              ? data.costUsd
+              : 0;
+        const capRaw =
+          typeof data.capUsd === 'number' && Number.isFinite(data.capUsd) && data.capUsd > 0
+            ? data.capUsd
+            : typeof data.costCapUsd === 'number' &&
+                Number.isFinite(data.costCapUsd) &&
+                data.costCapUsd > 0
+              ? data.costCapUsd
+              : 0;
+        setState({ costUsd: spentRaw, costCapUsd: capRaw, loading: false, error: null });
       } catch (err: unknown) {
         if (disposed) return;
         // AbortError on cleanup is expected; don't surface.
@@ -221,6 +243,23 @@ export function CostChip({ tutorialId, costUsdLive }: CostChipProps) {
         className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium bg-destructive/10 text-destructive"
       >
         Cost: unavailable
+      </span>
+    );
+  }
+
+  // T1.4: if the cap is missing or zero (server contract drift or env
+  // misconfiguration), show only the spent amount — no div-by-zero
+  // "$0.00 / $0.00 (0%)". This is friendlier than asserting + crashing.
+  if (state.costCapUsd <= 0) {
+    return (
+      <span
+        role="status"
+        aria-live="polite"
+        aria-label={`Cost so far: ${formatUsd(effectiveCost)}`}
+        className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium ${colorClasses}`}
+      >
+        <Dot bandClass={DOT_CLASSES[band]} />
+        <span aria-hidden="true">{formatUsd(effectiveCost)} used</span>
       </span>
     );
   }
