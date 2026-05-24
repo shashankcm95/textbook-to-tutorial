@@ -35,6 +35,9 @@ import { parsePdfBuffer } from '@/lib/pdf/parse';
 import { classifyOutline } from './classifier';
 import { buildChunkManifest } from './chunker';
 import { extractGlossaryFromSections, hasGlossarySections } from './glossary-extract';
+import { extractVoiceProfile } from './voice-extract';
+import { extractAnchorCandidates } from './anchor-prefilter';
+import { scoreAnchorCandidates } from './anchor-scorer';
 import {
   resolveChunksBucket,
   chunksPrefix,
@@ -43,10 +46,14 @@ import {
   writeChunk,
   writeMetadata,
   writeGlossary,
+  writeVoiceProfile,
+  writeAnchorWhitelist,
   chapterKey,
   type ChunkArtifact,
   type MetadataArtifact,
+  type AnchorWhitelistArtifact,
 } from '@/lib/s3-chunks';
+import type { SourceParagraph } from '@/lib/types';
 
 const MAX_PDF_BYTES = 50 * 1024 * 1024; // 50 MB — matches s3.ts default cap
 
@@ -127,6 +134,22 @@ export async function ingestWorker(tutorialId: string): Promise<void> {
       if (glossary.terms.length > 0) {
         await writeGlossary(bucket, sha256, glossary);
       }
+
+      // Voice + anchor side-assets (Feature B' Wave 3). Both depend only on
+      // the body paragraphs collected from the chunk manifest; neither
+      // depends on the other → run in parallel. FAIL-OPEN: a failure in
+      // either extractor logs + continues; downstream consumers
+      // (per-chapter generator, fidelity scorer) handle missing artifacts
+      // by falling back to v3 prompt behavior.
+      const bodyParagraphs: SourceParagraph[] = manifest.chunks
+        .filter((c) => c.classification === 'body')
+        .flatMap((c) => c.paragraphs);
+      const glossaryTermStrings: string[] = glossary.terms.map((t) => t.term);
+
+      await Promise.all([
+        runVoiceExtraction(bucket, sha256, bodyParagraphs),
+        runAnchorExtraction(bucket, sha256, bodyParagraphs, glossaryTermStrings),
+      ]);
 
       // Build + write metadata.json — the multi-user cache key.
       const skipped = manifest.skipped.map((s) => ({
@@ -314,6 +337,86 @@ async function writeChunkArtifact(
     paragraphs: chunk.paragraphs,
   };
   return writeChunk(bucket, sha256, artifact);
+}
+
+// ---------------------------------------------------------------------------
+// Voice + anchor side-asset runners — fail-open wrappers
+// ---------------------------------------------------------------------------
+//
+// Both wrappers swallow any error from the underlying extractor + S3 write,
+// logging a warning so operators can diagnose without breaking ingest.
+// Downstream consumers (Wave 3B per-chapter, Wave 3C fidelity scorer)
+// handle a missing artifact by falling back to the v3 prompt behavior.
+//
+// Why not propagate: tutorial ingest is the gateway to ALL downstream UX
+// (reading, quiz, flashcards). Voice + anchor profiles are quality-of-
+// generation improvements — they raise fidelity but their absence yields
+// a still-usable tutorial. Trading partial ingest failure for full ingest
+// failure is the wrong cost ratio.
+
+async function runVoiceExtraction(
+  bucket: string,
+  sha256: string,
+  bodyParagraphs: SourceParagraph[],
+): Promise<void> {
+  if (bodyParagraphs.length === 0) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[ingestWorker] voice-extract skipped for ${sha256}: zero body paragraphs`,
+    );
+    return;
+  }
+  try {
+    const profile = await extractVoiceProfile({
+      pdfSha256: sha256,
+      bodyParagraphs,
+    });
+    await writeVoiceProfile({ bucket, pdfSha256: sha256, profile });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[ingestWorker] voice-extract failed for ${sha256} (fail-open):`,
+      (err as Error).message,
+    );
+  }
+}
+
+async function runAnchorExtraction(
+  bucket: string,
+  sha256: string,
+  bodyParagraphs: SourceParagraph[],
+  glossaryTerms: string[],
+): Promise<void> {
+  if (bodyParagraphs.length === 0) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[ingestWorker] anchor-extract skipped for ${sha256}: zero body paragraphs`,
+    );
+    return;
+  }
+  try {
+    const candidates = extractAnchorCandidates({ bodyParagraphs, glossaryTerms });
+    const scored = await scoreAnchorCandidates({
+      pdfSha256: sha256,
+      candidates,
+    });
+    const artifact: AnchorWhitelistArtifact = {
+      schema_version: 1,
+      extracted_at: new Date().toISOString(),
+      model: scored.model,
+      extraction_cost_usd: scored.extractionCostUsd,
+      candidate_count: scored.candidateCount,
+      accepted_count: scored.acceptedCount,
+      anchors: scored.whitelist,
+    };
+    await writeAnchorWhitelist({ bucket, pdfSha256: sha256, whitelist: artifact });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[ingestWorker] anchor-extract failed for ${sha256} (fail-open):`,
+      (err as Error).message,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

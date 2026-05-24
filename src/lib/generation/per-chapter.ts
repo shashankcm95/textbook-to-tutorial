@@ -36,11 +36,22 @@ import {
   parsesCost,
   tutorials,
   chapterFidelityScores,
+  chapterAnchorViolations,
 } from '@/db/schema';
 import { generateNarrativeOnly } from '@/lib/openai/narrative-only';
 import { generateQuizFromNarrative } from '@/lib/openai/quiz-from-narrative';
 import { scoreFidelity } from '@/lib/openai/fidelity-check';
-import { readChunk, resolveChunksBucket } from '@/lib/s3-chunks';
+import {
+  readChunk,
+  resolveChunksBucket,
+  // Feature B' Wave 3 — voice + anchor profile loaders. Provided by Wave-3A's
+  // s3-chunks.ts extension. Both return null on S3 miss (tutorials ingested
+  // before Feature B' shipped have no artifacts → graceful degradation path).
+  readVoiceProfile,
+  readAnchorWhitelist,
+} from '@/lib/s3-chunks';
+import { validateAnchors, type AnchorWhitelistEntry } from '@/lib/openai/anchor-validator';
+import type { VoiceProfile } from '@/lib/ingest/voice-extract';
 import type { SourceParagraph } from '@/lib/types';
 
 export interface GenerateChapterArgs {
@@ -130,6 +141,12 @@ export async function generateChapter(
     throw new ChapterGenerationError('no source paragraphs', 'no-source');
   }
 
+  // ── 3.5. Load Feature B' voice + anchor artifacts (fail-open) ──────────
+  // Both may be null for legacy tutorials ingested before Feature B' shipped.
+  // When null, generateNarrativeOnly + scoreFidelity gracefully fall back to
+  // their pre-B' behavior; no rows land in chapter_anchor_violations.
+  const { voiceProfile, anchorWhitelist } = await loadVoiceAndAnchor(tutorial);
+
   // ── 4. Generate narrative (4o, streaming) ──────────────────────────────
   let narrativeResult;
   try {
@@ -138,6 +155,10 @@ export async function generateChapter(
       sourceParagraphs,
       abortSignal,
       onToken: onNarrativeToken ?? (() => {}),
+      // Feature B' Wave 3 — wire voice + anchor profile through to the
+      // narrative prompt. Both args are optional on the generator side.
+      voiceProfile: voiceProfile ?? undefined,
+      anchorWhitelist: anchorWhitelist ?? undefined,
     });
   } catch (err) {
     await markFailed(chapter.id, `narrative: ${(err as Error).message}`);
@@ -231,6 +252,54 @@ export async function generateChapter(
       .run();
   });
 
+  // ── 6.5. Validate whitelist-anchor coverage (Feature B' Wave 3) ──────
+  // Pure-function validator from anchor-validator.ts. Only runs when we have
+  // an anchor_whitelist artifact in S3 (i.e., the tutorial was ingested with
+  // Feature B' active). When violations are detected, persist ONE row to
+  // chapter_anchor_violations (policy: log-and-continue per design §D4 —
+  // no forced regeneration in v1). When all anchors are preserved, the
+  // ABSENCE of a row IS the success signal — no DB write needed.
+  //
+  // Fail-open semantics: validateAnchors is pure (can't throw under normal
+  // conditions), but if the violations INSERT fails for any reason
+  // (transient SQLite lock, etc.), we log + continue. Chapter completion
+  // takes priority over audit-row persistence.
+  if (anchorWhitelist && anchorWhitelist.length > 0) {
+    try {
+      const validation = validateAnchors({
+        narrative: narrativeResult.narrative,
+        sourceParagraphs,
+        whitelist: anchorWhitelist,
+      });
+      if (validation.missing.length > 0) {
+        const missingTerms = validation.missing.map((m) => m.term);
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[per-chapter] anchor coverage violation for ${chapter.id}: ` +
+            `${validation.missing.length}/${validation.expected.length} dropped ` +
+            `(score=${validation.score.toFixed(3)}); missing=${JSON.stringify(missingTerms)}`,
+        );
+        db.insert(chapterAnchorViolations)
+          .values({
+            id: crypto.randomUUID(),
+            chapterId: chapter.id,
+            expectedCount: validation.expected.length,
+            foundCount: validation.found.length,
+            missingAnchorsJson: JSON.stringify(missingTerms),
+            score: validation.score,
+            policyApplied: 'log-and-continue',
+            regenTriggered: 0,
+          })
+          .run();
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[per-chapter] anchor validation failed for ${chapter.id}: ${(err as Error).message}`,
+      );
+    }
+  }
+
   // ── 7. Score narrative-vs-source fidelity (DRIFT-test3-022) ──────────
   // Run a separate 4o-mini call to count preserved concrete anchors. Fail-
   // open: if the scorer errors, we proceed without a score (the chapter is
@@ -243,7 +312,14 @@ export async function generateChapter(
       narrative: narrativeResult.narrative,
       sourceParagraphs,
       abortSignal,
-    });
+      // Feature B' Wave 3 — pass the whitelist so the scorer can populate
+      // whitelistAnchorsPreserved + whitelistAnchorsMissing columns (added
+      // to chapter_fidelity_scores by Wave 1C migration). Wave 3C extends
+      // FidelityCheckArgs to accept this optional field; until that lands
+      // upstream, the assertion below keeps TypeScript green. The runtime
+      // value flows through unmodified on either side of the merge.
+      ...(anchorWhitelist ? { anchorWhitelist } : {}),
+    } as Parameters<typeof scoreFidelity>[0]);
     fidelityCostUsd = fidelity.costUsd;
     db.transaction((tx) => {
       tx.insert(chapterFidelityScores)
@@ -329,6 +405,57 @@ async function markFailed(chapterId: string, message: string): Promise<void> {
     // eslint-disable-next-line no-console
     console.error(`[per-chapter] CRITICAL: failed to mark chapter failed:`, err);
   }
+}
+
+/**
+ * Feature B' Wave 3 — load voice_profile + anchor_whitelist from S3 in
+ * parallel. Both helpers are provided by Wave-3A's s3-chunks.ts extension
+ * and return null on cache miss (legacy tutorials, partial Feature B'
+ * rollout, or transient S3 read failures swallowed inside the helpers).
+ *
+ * This wrapper exists for THREE reasons:
+ *   1. Single dependency for tests to mock (one `vi.mock` covers both
+ *      reads regardless of how Wave-3A's helpers evolve).
+ *   2. Fail-open: if either helper throws (the brief says they shouldn't,
+ *      but defensive coding for the integration boundary), log + return
+ *      null rather than blocking chapter generation. The chapter is
+ *      load-bearing; the voice/anchor artifacts are quality enhancements.
+ *   3. Skip the S3 round-trip cleanly when the tutorial pre-dates the
+ *      lazy-chunking pipeline (no sourcePdfSha256 → no parsed/<sha>/
+ *      prefix → nothing to load).
+ */
+async function loadVoiceAndAnchor(
+  tutorial: { sourceS3Url: string; sourcePdfSha256: string | null },
+): Promise<{
+  voiceProfile: VoiceProfile | null;
+  anchorWhitelist: AnchorWhitelistEntry[] | null;
+}> {
+  if (!tutorial.sourcePdfSha256) {
+    return { voiceProfile: null, anchorWhitelist: null };
+  }
+  const bucket = resolveChunksBucket(tutorial.sourceS3Url);
+  const pdfSha256 = tutorial.sourcePdfSha256;
+  const [voiceResult, anchorResult] = await Promise.allSettled([
+    readVoiceProfile({ bucket, pdfSha256 }),
+    readAnchorWhitelist({ bucket, pdfSha256 }),
+  ]);
+  const voiceProfile =
+    voiceResult.status === 'fulfilled' ? voiceResult.value : null;
+  const anchorWhitelist =
+    anchorResult.status === 'fulfilled' ? anchorResult.value : null;
+  if (voiceResult.status === 'rejected') {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[per-chapter] readVoiceProfile failed (continuing without voice): ${(voiceResult.reason as Error).message}`,
+    );
+  }
+  if (anchorResult.status === 'rejected') {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[per-chapter] readAnchorWhitelist failed (continuing without anchors): ${(anchorResult.reason as Error).message}`,
+    );
+  }
+  return { voiceProfile, anchorWhitelist };
 }
 
 async function persistNarrativeOnly(

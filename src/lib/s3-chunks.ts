@@ -30,11 +30,14 @@
 //     logic in classifier.ts.
 
 import { S3Client, GetObjectCommand, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { createHash } from 'node:crypto';
 import type { Readable } from 'node:stream';
 import { s3Env } from './env';
 import { parseS3Url } from './s3';
 import type { SourceParagraph } from './types';
 import type { OutlineClassification } from './ingest/classifier';
+import type { VoiceProfile } from './ingest/voice-extract';
+import type { AnchorWhitelistEntry } from './openai/anchor-validator';
 
 // ───────────────────────────────────────────────────────────────────────────
 // On-disk types — what we put in S3
@@ -109,6 +112,45 @@ export interface GlossaryArtifact {
   }>;
 }
 
+/**
+ * voice_profile.json — author-voice stylometric fingerprint.
+ *
+ * Written once per pdf_sha256 by the ingest worker after the voice extractor
+ * succeeds. Read once per chapter by the per-chapter generator (Wave 3B) so
+ * the prompt can inject a "preservation guide" for the author's distinct
+ * rhetorical voice. Absence is fail-open: the generator falls back to the
+ * v3 prompt behavior when this artifact doesn't exist.
+ *
+ * The on-disk shape IS the in-memory VoiceProfile produced by the extractor —
+ * no envelope wrapping. The extractor already includes the schema_version,
+ * extracted_at, model, cost, sample_size, and sampler_version fields, so the
+ * artifact is self-describing without further nesting.
+ */
+export type VoiceProfileArtifact = VoiceProfile;
+
+/**
+ * anchor_whitelist.json — load-bearing technical-anchor whitelist.
+ *
+ * Written once per pdf_sha256 by the ingest worker after the anchor pre-
+ * filter + LLM scorer succeed. Read once per chapter by the per-chapter
+ * generator (Wave 3B) for the anchor validator. Absence is fail-open.
+ *
+ * Envelope wraps the AnchorWhitelistEntry[] with provenance fields
+ * (schema_version, extracted_at, model, cost, candidate_count, accepted_count)
+ * to match the design doc's example schema and keep the shape forward-
+ * compatible. See docs/design/feature-b-voice-and-anchor-profile.md §"Output
+ * schema" for the anchor profile.
+ */
+export interface AnchorWhitelistArtifact {
+  schema_version: 1;
+  extracted_at: string; // ISO timestamp
+  model: string; // e.g. "gpt-4o-mini"
+  extraction_cost_usd: number;
+  candidate_count: number;
+  accepted_count: number;
+  anchors: AnchorWhitelistEntry[];
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // Path helpers
 // ───────────────────────────────────────────────────────────────────────────
@@ -137,6 +179,14 @@ export function chapterKey(pdfSha256: string, idx: number): string {
 
 export function glossaryKey(pdfSha256: string): string {
   return `${chunksPrefix(pdfSha256)}/glossary.json`;
+}
+
+export function voiceProfileKey(pdfSha256: string): string {
+  return `${chunksPrefix(pdfSha256)}/voice_profile.json`;
+}
+
+export function anchorWhitelistKey(pdfSha256: string): string {
+  return `${chunksPrefix(pdfSha256)}/anchor_whitelist.json`;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -228,6 +278,52 @@ export async function writeGlossary(
   const key = glossaryKey(pdfSha256);
   await putJson(bucket, key, glossary);
   return { s3Key: key };
+}
+
+/**
+ * Write the author-voice profile to S3 as voice_profile.json.
+ *
+ * Returns the resolved S3 key + sha256 hash of the serialized JSON body
+ * (useful for tracing / cache audit; not load-bearing on the read path).
+ *
+ * Throws S3ChunkWriteError on PUT failure — caller decides fail-open. Per
+ * the worker.ts contract, voice extraction is fail-open: a write failure
+ * here is logged + swallowed so tutorial ingest can still complete.
+ */
+export async function writeVoiceProfile(args: {
+  bucket: string;
+  pdfSha256: string;
+  profile: VoiceProfileArtifact;
+}): Promise<{ s3Key: string; contentHash: string }> {
+  const { bucket, pdfSha256, profile } = args;
+  const key = voiceProfileKey(pdfSha256);
+  const body = JSON.stringify(profile);
+  const contentHash = createHash('sha256').update(body).digest('hex');
+  await putJson(bucket, key, profile);
+  return { s3Key: key, contentHash };
+}
+
+/**
+ * Write the anchor whitelist to S3 as anchor_whitelist.json.
+ *
+ * Wraps the AnchorWhitelistEntry[] in an envelope with provenance fields
+ * (schema_version, extracted_at, model, costs, counts). See
+ * AnchorWhitelistArtifact for the on-disk shape.
+ *
+ * Returns the resolved S3 key + sha256 hash of the serialized JSON body.
+ * Throws S3ChunkWriteError on PUT failure — fail-open at the worker layer.
+ */
+export async function writeAnchorWhitelist(args: {
+  bucket: string;
+  pdfSha256: string;
+  whitelist: AnchorWhitelistArtifact;
+}): Promise<{ s3Key: string; contentHash: string }> {
+  const { bucket, pdfSha256, whitelist } = args;
+  const key = anchorWhitelistKey(pdfSha256);
+  const body = JSON.stringify(whitelist);
+  const contentHash = createHash('sha256').update(body).digest('hex');
+  await putJson(bucket, key, whitelist);
+  return { s3Key: key, contentHash };
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -336,6 +432,103 @@ export async function readGlossary(
   pdfSha256: string,
 ): Promise<GlossaryArtifact> {
   return getJson<GlossaryArtifact>(bucket, glossaryKey(pdfSha256));
+}
+
+/**
+ * Read the author-voice profile from S3. Returns `null` on cache miss
+ * (404 / NoSuchKey / ambiguous 403 — same policy as `chunksExist`).
+ *
+ * Callers (Wave 3B's per-chapter.ts) are required to gracefully degrade
+ * when the profile is absent — the v3 prompt path continues to work.
+ *
+ * Other errors (network, throttle, real auth failure on a bucket the
+ * caller can otherwise list) propagate as S3ChunkReadError so the caller
+ * sees a real problem rather than a silent miss.
+ */
+export async function readVoiceProfile(args: {
+  bucket: string;
+  pdfSha256: string;
+}): Promise<VoiceProfileArtifact | null> {
+  const { bucket, pdfSha256 } = args;
+  return getJsonOrNull<VoiceProfileArtifact>(bucket, voiceProfileKey(pdfSha256));
+}
+
+/**
+ * Read the anchor whitelist from S3. Returns the `anchors` array on a hit
+ * (unwrapping the on-disk envelope) or `null` on cache miss (same policy
+ * as `readVoiceProfile`).
+ *
+ * Why we unwrap here rather than returning the full envelope: the
+ * downstream consumer (Wave 3B per-chapter.ts) feeds the result directly
+ * into `validateAnchors`, which takes an `AnchorWhitelistEntry[]`. The
+ * envelope's provenance fields (model, cost, counts) are write-time
+ * metadata — they don't change the read-time API surface. If a future
+ * consumer needs the envelope, expose a `readAnchorWhitelistArtifact`
+ * sibling that returns the full `AnchorWhitelistArtifact`.
+ *
+ * Backward-compat note: if a pre-Wave-3 artifact happens to be a bare
+ * array on disk (no envelope), we still accept it — the unwrap is
+ * defensive.
+ */
+export async function readAnchorWhitelist(args: {
+  bucket: string;
+  pdfSha256: string;
+}): Promise<AnchorWhitelistEntry[] | null> {
+  const { bucket, pdfSha256 } = args;
+  const raw = await getJsonOrNull<AnchorWhitelistArtifact | AnchorWhitelistEntry[]>(
+    bucket,
+    anchorWhitelistKey(pdfSha256),
+  );
+  if (raw === null) return null;
+  if (Array.isArray(raw)) return raw;
+  return raw.anchors ?? [];
+}
+
+/**
+ * Wrapper around getJson that converts a "not present" S3 response into
+ * `null` instead of throwing. Mirrors the cache-miss policy of
+ * `chunksExist`: 404 / NoSuchKey AND ambiguous 403 (no s3:ListBucket
+ * grant) both surface as null + a one-line warning.
+ *
+ * Real failures (network, throttle, malformed JSON in an existing object)
+ * still throw S3ChunkReadError so the caller can distinguish "miss" from
+ * "broken cache entry" — only the latter merits a retry / re-extraction.
+ */
+async function getJsonOrNull<T>(bucket: string, key: string): Promise<T | null> {
+  const client = buildClient();
+  let resp;
+  try {
+    resp = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  } catch (err) {
+    const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
+    const code = e.name;
+    if (code === 'NotFound' || code === 'NoSuchKey') return null;
+    const status = e.$metadata?.httpStatusCode;
+    if (status === 404) return null;
+    if (status === 403) {
+      // Ambiguous 403 — mirrors the chunksExist policy. Treat as cache
+      // miss + log so operators can spot a permission gap.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[s3-chunks] GET ${key} returned 403; treating as cache miss. ` +
+          `Grant s3:ListBucket + GetObject on /parsed/* to enable cleaner cache-hit semantics.`,
+      );
+      return null;
+    }
+    throw new S3ChunkReadError(`sdk send failed: ${(err as Error).message}`, bucket, key, err);
+  }
+  if (!resp.Body) throw new S3ChunkReadError('response body empty', bucket, key);
+  const text = await streamToString(resp.Body as Readable);
+  try {
+    return JSON.parse(text) as T;
+  } catch (err) {
+    throw new S3ChunkReadError(
+      `json parse failed: ${(err as Error).message}`,
+      bucket,
+      key,
+      err,
+    );
+  }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
