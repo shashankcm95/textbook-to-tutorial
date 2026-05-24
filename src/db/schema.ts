@@ -405,6 +405,13 @@ export const chapterFidelityScores = sqliteTable(
     specificNumbersMissing: integer('specific_numbers_missing').notNull().default(0),
     namedExamplesMissing: integer('named_examples_missing').notNull().default(0),
     terminologicalContrastsMissing: integer('terminological_contrasts_missing').notNull().default(0),
+    // ── Feature B' anchor-aware fidelity (0004 migration) ──
+    // Whitelist anchors (curated by glossary-extract + chunk paragraph terms)
+    // that were preserved / missing in the generated narrative. Nullable so
+    // rows scored before Feature B' shipped remain valid; new scores populate
+    // these alongside the original "preserved/missing" tallies above.
+    whitelistAnchorsPreserved: integer('whitelist_anchors_preserved'),
+    whitelistAnchorsMissing: integer('whitelist_anchors_missing'),
     overallScore: integer('overall_score').notNull(),
     notesJson: text('notes_json').notNull().default('[]'),
     model: text('model').notNull(),
@@ -424,6 +431,61 @@ export type ChapterFidelityScore = typeof chapterFidelityScores.$inferSelect;
 export type NewChapterFidelityScore = typeof chapterFidelityScores.$inferInsert;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// chapter_anchor_violations — Feature B' anchor-validator audit (0003 migration)
+//
+// After narrative generation, src/lib/openai/anchor-validator.ts checks whether
+// whitelist anchors present in a chunk's source paragraphs appear verbatim in
+// the generated narrative. Each chapter generation that produces violations
+// writes one row here.
+//
+// Side-table (not chapter column) for the same reasons chapter_fidelity_scores
+// is a side-table:
+//   - Allows multiple violation records per chapter (regeneration history).
+//   - Doesn't bloat the chapters projection used by SSR.
+//   - Cleanly cascade-deletes on chapter removal.
+//
+// Policy column distinguishes the two enforcement modes:
+//   - 'log-and-continue' — record the violation, surface to fidelity UI, ship
+//   - 'forced-regen' — violation was severe enough to trigger a regenerate pass
+// regen_triggered (0/1) tracks whether a regen actually fired this turn.
+//
+// Driven by design doc: docs/design/feature-b-voice-and-anchor-profile.md
+// §Component 4 — Anchor Validator.
+// ─────────────────────────────────────────────────────────────────────────────
+export const ANCHOR_VIOLATION_POLICIES = [
+  'log-and-continue',
+  'forced-regen',
+] as const;
+
+export const chapterAnchorViolations = sqliteTable(
+  'chapter_anchor_violations',
+  {
+    id: text('id').primaryKey().notNull(),
+    chapterId: text('chapter_id')
+      .notNull()
+      .references(() => chapters.id, { onDelete: 'cascade' }),
+    expectedCount: integer('expected_count').notNull(),
+    foundCount: integer('found_count').notNull(),
+    missingAnchorsJson: text('missing_anchors_json').notNull().default('[]'),
+    score: real('score').notNull(),                                    // CHECK 0..1 in SQL
+    policyApplied: text('policy_applied', { enum: ANCHOR_VIOLATION_POLICIES })
+      .notNull()
+      .default('log-and-continue'),
+    regenTriggered: integer('regen_triggered').notNull().default(0),   // 0/1 boolean per SQLite convention
+    createdAt: integer('created_at', { mode: 'timestamp' })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    byChapterRecent: index('idx_anchor_violations_chapter_recent').on(t.chapterId, t.createdAt),
+  }),
+);
+
+export type ChapterAnchorViolation = typeof chapterAnchorViolations.$inferSelect;
+export type NewChapterAnchorViolation = typeof chapterAnchorViolations.$inferInsert;
+export type AnchorViolationPolicy = (typeof ANCHOR_VIOLATION_POLICIES)[number];
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Re-export aggregate — convenience for `import * as schema from './schema'`
 // (drizzle migrator requires the schema namespace at runtime).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -438,4 +500,5 @@ export const schema = {
   glossaryTerms,
   skippedSections,
   chapterFidelityScores,
+  chapterAnchorViolations,
 };
