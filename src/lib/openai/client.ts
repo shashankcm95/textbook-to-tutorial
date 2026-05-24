@@ -43,8 +43,13 @@ function buildClient(): OpenAI {
     // with explicit backoff curves). Disable SDK-level retries so we don't
     // double-retry and triple our cost on a single 429.
     maxRetries: 0,
-    // 30s connect timeout; per-request streaming has its own AbortSignal.
-    timeout: 30_000,
+    // 120s timeout — dense chapter narratives (4o on full DDIA chapters with
+    // ~200-paragraph contexts) routinely run 20-40s wall-clock, and the v3
+    // fidelity-rules expansion pushed input prompts longer. Bumped from 30s
+    // (DRIFT-test3-027) after v3 regen saw 4/6 timeouts on retry.
+    // Per-request streaming still has its own AbortSignal for callers that
+    // need tighter ceilings.
+    timeout: 120_000,
   });
 }
 
