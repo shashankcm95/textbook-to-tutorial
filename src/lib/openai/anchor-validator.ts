@@ -137,12 +137,33 @@ const REGEX_METACHAR_RE = /[.*+?^${}()|[\]\\]/g;
  * (not normalized) — the design doc explicitly requires verbatim match.
  */
 export function containsAnchor(haystack: string, anchor: string): boolean {
-  if (!anchor) return false;
-  const escaped = anchor.replace(REGEX_METACHAR_RE, '\\$&');
-  // (^|[^A-Za-z0-9])  — start of string OR a non-alphanumeric guard char
-  // ([^A-Za-z0-9]|$)  — non-alphanumeric guard char OR end of string
-  // The `i` flag makes the literal portion case-insensitive.
-  const re = new RegExp(`(^|[^A-Za-z0-9])${escaped}([^A-Za-z0-9]|$)`, 'i');
+  // Wave-1 review MEDIUM M2 fix: whitespace-padded anchors from LLM-generated
+  // whitelists previously silently failed to match. Trim before checking.
+  const trimmed = anchor.trim();
+  if (!trimmed) return false;
+  const escaped = trimmed.replace(REGEX_METACHAR_RE, '\\$&');
+
+  // Boundary semantics (refined per Wave-1 review HIGH H1 + H2):
+  //
+  //   Leading lookbehind  (?<![A-Za-z0-9-])
+  //     Rejects matches where the preceding character is alphanumeric
+  //     OR a hyphen. The hyphen guard fixes HIGH H2: anchor "C++" must
+  //     NOT match inside "Objective-C++" because the `-` would otherwise
+  //     have qualified as a non-alphanumeric leading boundary under the
+  //     original `[^A-Za-z0-9]` rule. Treating hyphen as part-of-token
+  //     correctly rejects compound-name suffixes.
+  //
+  //   Trailing negative lookaheads:
+  //     (?!\.\d)         — rejects `.digit` following the match. Fixes
+  //                        HIGH H1: anchor "p99" must NOT match inside
+  //                        "p99.9" because `.9` is a metric suffix, not
+  //                        a sentence-ending period.
+  //     (?![A-Za-z0-9])  — standard non-alphanumeric trailing guard.
+  //
+  // Vacuous-true at string boundaries: `^` has no preceding char so the
+  // lookbehind is vacuously satisfied; `$` has no next char so both
+  // lookaheads pass. Edge cases work as in the original consuming form.
+  const re = new RegExp(`(?<![A-Za-z0-9-])${escaped}(?!\\.\\d)(?![A-Za-z0-9])`, 'i');
   return re.test(haystack);
 }
 

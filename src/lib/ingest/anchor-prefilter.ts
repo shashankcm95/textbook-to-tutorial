@@ -91,6 +91,21 @@ const COMMON_SENTENCE_START_STOPLIST = new Set<string>([
   'This', 'That', 'These', 'Those',
   'What', 'When', 'Where', 'Why', 'How', 'Who', 'Which',
   'But', 'And', 'Or', 'So', 'Yet',
+  // Wave-1 review HIGH L-2: expanded to include common-English titles
+  // that frequently appear at sentence-start positions in technical prose.
+  'In', 'At', 'With', 'For', 'If', 'As', 'By', 'From', 'On', 'To', 'Of',
+]);
+
+/**
+ * Stoplist for all-caps short words (heuristic 2 extension for acronyms).
+ * Filters trivial all-caps non-terms — without it, common standalone
+ * conjunctions / articles / boolean keywords would surface as "acronyms".
+ */
+const ALL_CAPS_STOPLIST = new Set<string>([
+  'IN', 'AND', 'OR', 'NOT', 'THE', 'NO', 'YES', 'ON', 'OFF',
+  'TO', 'BY', 'AT', 'IF', 'AS', 'IS', 'OF', 'AN', 'A', 'I',
+  'WE', 'IT', 'BE', 'DO', 'GO', 'SO', 'UP', 'US',
+  'OK', 'OS', 'AKA', 'TLDR',
 ]);
 
 /**
@@ -107,8 +122,20 @@ const COMMON_SENTENCE_START_STOPLIST = new Set<string>([
 const CAPITALIZED_MULTIWORD_RE =
   /\b[A-Z][a-z]+(?:[\s-](?:[A-Z][a-z]+|of|the|and|for|in|on|to)){0,4}[\s-][A-Z][a-z]+\b/g;
 
-/** Single capitalized word (used for the frequency-≥3 sweep in heuristic 2). */
-const SINGLE_CAPITALIZED_RE = /\b[A-Z][a-z]+\b/g;
+/**
+ * Single capitalized word (used for the frequency-≥3 sweep in heuristic 2).
+ *
+ * Wave-1 review HIGH H1 fix: extended to also match all-caps acronyms
+ * (≥2 chars). Before this, technical acronyms like "RAFT", "ACID", "TCP",
+ * "Kafka" appearing 3+ times in body text were invisible to this heuristic
+ * — a load-bearing miss because most CS textbook anchors ARE all-caps
+ * (RAID, CAP, MVCC, ACID, CRDT, ...).
+ *
+ * The alternation `(?:[A-Z][a-z]+|[A-Z]{2,})` captures both Title-Case
+ * (`Kafka`) and ALL-CAPS (`RAFT`) forms. Filtered downstream by
+ * COMMON_SENTENCE_START_STOPLIST (Title-Case) and ALL_CAPS_STOPLIST (acronyms).
+ */
+const SINGLE_CAPITALIZED_RE = /\b(?:[A-Z][a-z]+|[A-Z]{2,})\b/g;
 
 /** Lowercase hyphenated compound: 2 to 4 lowercase words joined by hyphen. */
 const HYPHENATED_COMPOUND_RE = /\b[a-z]+(?:-[a-z]+){1,3}\b/g;
@@ -123,7 +150,11 @@ const HYPHENATED_COMPOUND_RE = /\b[a-z]+(?:-[a-z]+){1,3}\b/g;
  * the curly forms.
  */
 const QUOTED_STRAIGHT_RE = /"([^"]{8,200})"/g;
-const QUOTED_CURLY_RE = /[“”‟″]([^“”‟″]{8,200})[“”‟″]/g;
+// Wave-1 review HIGH H4 fix: include U+2018 ('‘') and U+2019 ('’') —
+// single-curly quotes — which are the dominant quoting style in
+// LaTeX-typeset technical PDFs. Without these, named paper titles +
+// signature analogies quoted in single curlies were silently dropped.
+const QUOTED_CURLY_RE = /[“”‟‘’′″]([^“”‟‘’′″]{8,200})[“”‟‘’′″]/g;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -177,10 +208,8 @@ function isLikelySentenceStartArtifact(
   offset: number,
   fullText: string,
 ): boolean {
-  // Only 2-word matches with a space separator can be sentence-splices.
-  const parts = match.split(/\s+/);
-  if (parts.length !== 2) return false;
   if (match.includes('-')) return false; // hyphenated compounds aren't splices
+  const parts = match.split(/\s+/);
 
   // Check the char immediately before the match (skipping whitespace) — if
   // it's sentence-ending punctuation, the first word is a sentence-starter.
@@ -189,6 +218,23 @@ function isLikelySentenceStartArtifact(
   const prevChar = i >= 0 ? fullText[i] : '';
   const firstIsSentenceStart = prevChar === '.' || prevChar === '?' || prevChar === '!' || offset === 0;
   if (!firstIsSentenceStart) return false;
+
+  // Wave-1 review HIGH H2 fix: extended to N-word phrases (was previously
+  // restricted to 2-word). If the FIRST word is a known sentence-start
+  // stopword AND the match is at a sentence boundary, the whole phrase is
+  // almost certainly a splice artifact ("The First Principle ..." at
+  // start of paragraph), regardless of length. Conservative: only fires
+  // when both signals (stopword + boundary) hold, so real proper nouns
+  // that happen to start with "The" (rare for technical books) aren't
+  // filtered when they appear mid-paragraph.
+  if (parts.length >= 2 && parts[0] && COMMON_SENTENCE_START_STOPLIST.has(parts[0])) {
+    return true;
+  }
+
+  // The legacy 2-word period-after heuristic (preserved): only applies to
+  // exact 2-word matches that are followed immediately by sentence-ending
+  // punctuation. Catches edge cases the stopword check misses.
+  if (parts.length !== 2) return false;
 
   // Check whether a period appears between the two words — i.e., the regex
   // ate a "...word1. Word2..." boundary. Since the regex requires `\s` or
@@ -236,7 +282,11 @@ function extractCapitalizedFrequency(paragraphs: SourceParagraph[]): RawHit[] {
     let m: RegExpExecArray | null;
     while ((m = SINGLE_CAPITALIZED_RE.exec(p.text)) !== null) {
       const word = m[0];
+      // Wave-1 review HIGH H1 fix: dual stoplist — Title-Case stopwords
+      // for `Word` matches; all-caps stopwords for `WORD` matches (the
+      // extended regex now surfaces both).
       if (COMMON_SENTENCE_START_STOPLIST.has(word)) continue;
+      if (ALL_CAPS_STOPLIST.has(word)) continue;
       const existing = counts.get(word);
       if (existing) {
         existing.count += 1;

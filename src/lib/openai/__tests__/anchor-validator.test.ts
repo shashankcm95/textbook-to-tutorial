@@ -302,6 +302,53 @@ describe('validateAnchors — word-boundary correctness', () => {
     expect(result.found).toHaveLength(1);
     expect(result.score).toBe(1.0);
   });
+
+  // Wave-1 review HIGH H1: digit-as-non-boundary false positive
+  it('anchor "p99" does NOT match haystack containing only "p99.9" (digit-suffix guard)', () => {
+    // Both anchors appear in DDIA literature as distinct metrics:
+    //   p99   = 99th percentile latency
+    //   p99.9 = 99.9th percentile latency ("three nines")
+    // A narrative mentioning only p99.9 must NOT be credited with mentioning p99.
+    expect(containsAnchor('tail p99.9 latency is 500ms', 'p99')).toBe(false);
+    // But p99 alone (no .digit) SHOULD match.
+    expect(containsAnchor('tail p99 latency is 500ms', 'p99')).toBe(true);
+    // And p99.9 anchor against p99.9 haystack should match (full literal).
+    expect(containsAnchor('tail p99.9 latency is 500ms', 'p99.9')).toBe(true);
+  });
+
+  // Wave-1 review HIGH H2: hyphen-as-non-boundary false positive
+  it('anchor "C++" does NOT match haystack containing only "Objective-C++" (hyphen-prefix guard)', () => {
+    // Objective-C++ is a distinct language from C++; a narrative about
+    // Objective-C++ must NOT be credited with mentioning C++.
+    expect(containsAnchor('Objective-C++ programming', 'C++')).toBe(false);
+    // But C++ alone (no hyphen-prefix) SHOULD match.
+    expect(containsAnchor('C++ programming', 'C++')).toBe(true);
+    // Sanity: anchor with leading space is now trimmed (M2 fix); still matches.
+    expect(containsAnchor('C++ programming', '  C++  ')).toBe(true);
+  });
+
+  // Wave-1 review MEDIUM M2: whitespace-padded anchor regression guard
+  it('whitespace-padded anchor terms still match (trim applied internally)', () => {
+    expect(containsAnchor('the RAID array', '  RAID  ')).toBe(true);
+    expect(containsAnchor('Chaos Monkey kills nodes', '\tChaos Monkey\n')).toBe(true);
+    // All-whitespace anchor is treated as empty.
+    expect(containsAnchor('any haystack', '   ')).toBe(false);
+  });
+
+  // Wave-1 review MEDIUM M4: explicit coverage of dangerous regex metacharacters
+  it('anchor with pipe (|) does not create false alternation matches', () => {
+    // If `|` were not escaped, `R|W` anchor would match `R` OR `W` anywhere.
+    // The escape must keep it as a literal `R|W`.
+    const result = validateAnchors({
+      narrative: 'discusses R reads and W writes separately',
+      sourceParagraphs: [mkParagraph('the R|W ratio for this workload is 90:10')],
+      whitelist: [mkAnchor('R|W')],
+    });
+    // R|W is in source but the narrative doesn't contain the literal
+    // "R|W" — only "R" and "W" separately. Verbatim match must fail.
+    expect(result.found).toHaveLength(0);
+    expect(result.missing.map((a) => a.term)).toEqual(['R|W']);
+  });
 });
 
 // ───────────────────────────────────────────────────────────────────────────

@@ -260,10 +260,17 @@ describe('extractVoiceProfile', () => {
   });
 
   it('throws VoiceProfileParseError after exhausting the retry budget on malformed JSON', async () => {
-    // withRetry's parse-error budget is `[0]` but `Math.min(attempt, 0) === 0`
-    // for every attempt, so parse errors are retried up to maxAttempts() = 7.
-    // We mockResolvedValue (not Once) so every call returns the malformed
-    // response and the loop walks the full attempt budget.
+    // withRetry's parseError schedule is `[0]` (one slot). Per `_retry.ts`
+    // `computeRetryDelay`, `Math.min(attempt, parseError.length - 1) === 0`
+    // for every attempt, so parse errors are eligible for retry up to
+    // `maxAttempts() = 1 + 3 + 2 + 1 = 7` total attempts (1 initial + 3
+    // rateLimit slots + 2 serverError slots + 1 parseError slot, all
+    // budget arms walkable via the shared `attempt` counter).
+    //
+    // Wave-1 review HIGH H-1 fix: pin the assertion to the actual upper
+    // bound (7), not `> 1`. Pinning catches regressions in either
+    // direction (e.g., a future tightening to a real 1-parse-retry policy
+    // would silently pass `> 1` but fail this exact `=== 7` assertion).
     createMock.mockResolvedValue(buildOpenAIResponseFromContent('this is not JSON {'));
 
     await expect(
@@ -273,9 +280,24 @@ describe('extractVoiceProfile', () => {
       }),
     ).rejects.toBeInstanceOf(VoiceProfileParseError);
 
-    // Confirms withRetry IS on the call path — more than 1 call means at
-    // least one parse-retry was scheduled (i.e., the wrapper is wired up).
-    expect(createMock.mock.calls.length).toBeGreaterThan(1);
+    // maxAttempts() = 7 per _retry.ts; every attempt re-enters parseError
+    // budget [0] via the shared-attempt-counter semantic.
+    expect(createMock.mock.calls.length).toBe(7);
+  });
+
+  it('throws on empty bodyParagraphs (Wave-1 review HIGH H-2)', async () => {
+    // Empty bodyParagraphs previously slipped through and called the LLM
+    // with zero context, producing a hallucinated profile. Now surfaces
+    // loudly as a caller error.
+    await expect(
+      extractVoiceProfile({
+        pdfSha256: 'sha-empty-body',
+        bodyParagraphs: [],
+      }),
+    ).rejects.toThrow(/bodyParagraphs is empty/);
+
+    // The LLM must NOT have been called at all for this path.
+    expect(createMock).not.toHaveBeenCalled();
   });
 
   it('throws VoiceProfileParseError when JSON is valid but the shape is wrong', async () => {

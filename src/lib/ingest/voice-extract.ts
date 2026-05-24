@@ -297,6 +297,16 @@ export async function extractVoiceProfile(
   const { bodyParagraphs, abortSignal } = args;
   if (!isSupportedModel(MODEL)) throw new UnknownModelError(MODEL);
 
+  // Wave-1 review HIGH H-2: empty bodyParagraphs would produce a
+  // hallucinated voice profile (LLM called with zero context); caller
+  // would persist it to S3 and poison the cache for that pdf_sha256.
+  // Surface loudly instead — this is a caller error, not a runtime case.
+  if (bodyParagraphs.length === 0) {
+    throw new Error(
+      'extractVoiceProfile: bodyParagraphs is empty; cannot extract voice profile from zero context',
+    );
+  }
+
   const samples = sampleParagraphs(bodyParagraphs);
   const userPrompt = buildVoiceUserPrompt(samples);
 

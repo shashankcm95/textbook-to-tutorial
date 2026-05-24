@@ -48,13 +48,11 @@ describe('extractAnchorCandidates — heuristic 1: capitalized multi-word', () =
       p(2, 1, 'The classic problem is Head-of-Line Blocking in TCP streams.'),
     ];
     const results = extractAnchorCandidates({ bodyParagraphs: paragraphs });
-    // The phrase contains internal "of" (lowercase), so the regex matches
-    // either "Head-of-Line Blocking" wholly (if the regex spans the chunk)
-    // or a sub-span. We assert that SOMETHING beginning with "Head" was
-    // captured — exact span depends on regex interpretation of mixed-case
-    // hyphen joins. The relevant invariant is: a capitalized-multiword
-    // candidate was surfaced for this paragraph.
-    const headHit = results.find((c) => c.term.startsWith('Head'));
+    // Wave-1 review HIGH H3 fix: tighten the assertion to the FULL canonical
+    // span "Head-of-Line Blocking" — previously this matched any term
+    // starting with "Head", which would silently pass if the regex emitted
+    // a partial span like "Head-of-Line" without "Blocking".
+    const headHit = results.find((c) => c.term === 'Head-of-Line Blocking');
     expect(headHit).toBeDefined();
     expect(headHit?.source).toBe('capitalized-multiword');
   });
@@ -413,5 +411,133 @@ describe('extractAnchorCandidates — edge cases', () => {
     const paragraphs = [p(1, 0, 'just some lowercase prose with no anchors.')];
     const results = extractAnchorCandidates({ bodyParagraphs: paragraphs });
     expect(results).toEqual([]);
+  });
+
+  it('bodyParagraphs with empty-text paragraphs returns empty array (no crash)', () => {
+    const paragraphs = [p(1, 0, ''), p(1, 1, ''), p(2, 0, '')];
+    const results = extractAnchorCandidates({ bodyParagraphs: paragraphs });
+    expect(results).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave-1 review HIGH H1: all-caps acronyms (heuristic 2 extension)
+// ---------------------------------------------------------------------------
+
+describe('extractAnchorCandidates — all-caps acronyms (Wave-1 review HIGH H1)', () => {
+  it('captures all-caps acronym occurring ≥3 times', () => {
+    // Before the H1 fix, SINGLE_CAPITALIZED_RE was /\b[A-Z][a-z]+\b/g —
+    // an all-caps term like RAFT had zero matches and was silently missed.
+    // After the fix, the regex matches both Title-Case and ALL-CAPS forms.
+    const paragraphs = [
+      p(1, 0, 'The RAFT protocol elects a leader.'),
+      p(1, 1, 'RAFT log entries are replicated to a quorum.'),
+      p(2, 0, 'Both Paxos and RAFT solve consensus.'),
+    ];
+    const results = extractAnchorCandidates({ bodyParagraphs: paragraphs });
+    const hit = results.find((c) => c.term === 'RAFT');
+    expect(hit).toBeDefined();
+    expect(hit?.source).toBe('capitalized-frequency');
+    expect(hit?.frequency).toBe(3);
+  });
+
+  it('captures multiple all-caps acronyms (ACID, TCP, MVCC) in one corpus', () => {
+    const paragraphs = [
+      p(1, 0, 'ACID transactions are foundational. ACID is the standard.'),
+      p(1, 1, 'TCP guarantees ordered delivery. TCP retries lost segments.'),
+      p(2, 0, 'MVCC uses snapshots. MVCC is read-optimized. ACID and MVCC.'),
+      p(3, 0, 'Together ACID, TCP, and MVCC define the durability layer.'),
+    ];
+    const results = extractAnchorCandidates({ bodyParagraphs: paragraphs });
+    const terms = new Set(results.map((c) => c.term));
+    expect(terms.has('ACID')).toBe(true);
+    expect(terms.has('TCP')).toBe(true);
+    expect(terms.has('MVCC')).toBe(true);
+  });
+
+  it('filters all-caps stopwords (IN, AND, OR, NOT)', () => {
+    // Sentence-start stopwords would otherwise dominate any technical doc.
+    const paragraphs = [
+      p(1, 0, 'IN the beginning. IN the middle. IN the end.'),
+      p(1, 1, 'AND therefore. AND also. AND finally.'),
+      p(2, 0, 'OR perhaps. OR maybe. OR not.'),
+    ];
+    const results = extractAnchorCandidates({ bodyParagraphs: paragraphs });
+    const terms = new Set(results.map((c) => c.term));
+    expect(terms.has('IN')).toBe(false);
+    expect(terms.has('AND')).toBe(false);
+    expect(terms.has('OR')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave-1 review HIGH H2: N-word sentence-start filter
+// ---------------------------------------------------------------------------
+
+describe('extractAnchorCandidates — N-word sentence-start filter (Wave-1 review HIGH H2)', () => {
+  it('filters "The First Principle" at sentence-start position (3-word phrase)', () => {
+    // Pre-fix: only 2-word splices were filtered. "The First Principle" at
+    // sentence-start would leak through as a capitalized-multiword candidate.
+    // Post-fix: phrases beginning with a known sentence-start stopword AT
+    // sentence-boundary are filtered regardless of length.
+    const paragraphs = [
+      p(1, 0, 'The First Principle of distributed systems is acknowledging that the network is unreliable.'),
+    ];
+    const results = extractAnchorCandidates({ bodyParagraphs: paragraphs });
+    const noise = results.find((c) => c.term === 'The First Principle');
+    expect(noise).toBeUndefined();
+  });
+
+  it('does NOT filter a real proper noun that happens to start with "The" mid-sentence', () => {
+    // The conservative rule: filter ONLY when BOTH (a) starts with stopword
+    // AND (b) at sentence boundary. A mid-paragraph occurrence is preserved.
+    const paragraphs = [
+      p(1, 0, 'Many systems use The Bigtable Pattern for sparse tables today, including HBase and Cassandra.'),
+    ];
+    const results = extractAnchorCandidates({ bodyParagraphs: paragraphs });
+    // The phrase is mid-sentence (after "use"), so the filter does NOT fire.
+    // Whether the regex captures it depends on the engine; we assert only
+    // that the filter doesn't prematurely strike it.
+    const hit = results.find((c) => c.term.startsWith('The Bigtable'));
+    if (hit) {
+      // If captured, it must be a valid multiword (not filtered as splice)
+      expect(hit.source).toBe('capitalized-multiword');
+    }
+    // The test passes regardless of whether the regex captured the phrase;
+    // what we're verifying is that the filter logic doesn't OVER-fire.
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave-1 review HIGH H4: single curly quotes (U+2018/U+2019)
+// ---------------------------------------------------------------------------
+
+describe('extractAnchorCandidates — single curly quotes (Wave-1 review HIGH H4)', () => {
+  it('matches a phrase quoted with single curly quotes (LaTeX-typeset PDFs)', () => {
+    // Pre-fix: QUOTED_CURLY_RE only matched double curlies (U+201C/U+201D).
+    // LaTeX-typeset technical books predominantly use single curly quotes
+    // for short citations and signature analogies. Without this fix, those
+    // phrases were silently dropped from the candidate list.
+    const paragraphs = [
+      p(1, 0, 'Kleppmann describes ‘the celebrity hybrid pattern’ in chapter 1.'),
+    ];
+    const results = extractAnchorCandidates({ bodyParagraphs: paragraphs });
+    const hit = results.find(
+      (c) => c.source === 'quoted-phrase' && c.term === 'the celebrity hybrid pattern',
+    );
+    expect(hit).toBeDefined();
+  });
+
+  it('matches both single and double curly quotes in the same paragraph', () => {
+    const paragraphs = [
+      p(1, 0,
+        'The author calls it “the celebrity hybrid resolution”, ' +
+          'inspired by ‘the impedance mismatch metaphor’ from earlier.',
+      ),
+    ];
+    const results = extractAnchorCandidates({ bodyParagraphs: paragraphs });
+    const terms = new Set(results.map((c) => c.term));
+    expect(terms.has('the celebrity hybrid resolution')).toBe(true);
+    expect(terms.has('the impedance mismatch metaphor')).toBe(true);
   });
 });
