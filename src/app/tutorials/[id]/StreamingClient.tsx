@@ -614,10 +614,12 @@ export function StreamingClient(props: StreamingClientProps) {
   ).length;
   const completionPct =
     orderedChapters.length === 0 ? 0 : completedCount / orderedChapters.length;
-  // Book metadata — Sprint Bv2.5 dynamic version. The page.tsx derives
-  // this from the source S3 URL via bookMetadataFromS3Url(). Fallback
-  // is the same defaults the TutorialHeader uses internally
-  // ("Untitled tutorial" with no author line).
+  // Book metadata — Sprint D Phase 1 DB-first resolution. The page.tsx
+  // calls resolveBookMetadata(tutorial) which prefers PDF /Info or XMP
+  // metadata extracted at ingest, falling back to the filename heuristic
+  // (bookMetadataFromS3Url) for pre-migration rows or PDFs that lack
+  // embedded metadata. Fallback defaults are the same the TutorialHeader
+  // uses internally ("Untitled tutorial" with no author line).
   const bookTitle = bookMetadata?.bookTitle ?? '';
   const bookAuthor = bookMetadata?.author ?? '';
   // Round-2 (Author): when book-metadata derivation is low-confidence

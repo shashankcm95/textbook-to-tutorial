@@ -38,6 +38,8 @@ import { extractGlossaryFromSections, hasGlossarySections } from './glossary-ext
 import { extractVoiceProfile } from './voice-extract';
 import { extractAnchorCandidates } from './anchor-prefilter';
 import { scoreAnchorCandidates } from './anchor-scorer';
+import { extractPdfMetadata, type PdfMetadata } from './extract-pdf-metadata';
+import { bookMetadataFromS3Url } from '@/lib/book-metadata';
 import {
   resolveChunksBucket,
   chunksPrefix,
@@ -91,6 +93,19 @@ export async function ingestWorker(tutorialId: string): Promise<void> {
     const { buffer } = await fetchPdfFromS3(tutorial.sourceS3Url, MAX_PDF_BYTES);
     const sha256 = createHash('sha256').update(buffer).digest('hex');
     const bucket = resolveChunksBucket(tutorial.sourceS3Url);
+
+    // ── Sprint D Phase 1: per-PDF metadata extraction ──────────────────
+    // Run this BEFORE the cache-hit branch so both fast-path and full-path
+    // ingests populate the new tutorials.book_title / book_author /
+    // metadata_source columns. extractPdfMetadata is fail-open by contract
+    // (returns source='none' on any error), so it can't break ingest. When
+    // both /Info and XMP yield nothing usable, we fall back to the existing
+    // filename heuristic and tag the source 'filename' — the UI keeps the
+    // "Auto-detected" warning badge in that case.
+    const resolvedMetadata = resolveBookMetadataForIngest(
+      await extractPdfMetadata(buffer),
+      tutorial.sourceS3Url,
+    );
 
     // ── Phase 3: cache check + (parse or reuse) ─────────────────────────
     let metadata: MetadataArtifact;
@@ -245,6 +260,12 @@ export async function ingestWorker(tutorialId: string): Promise<void> {
           parsedS3Prefix: parsedPrefix,
           maxUnlockedChapterIdx: 0,
           outlineClassificationVersion: metadata.classificationVersion,
+          // Sprint D Phase 1: persist resolved per-PDF metadata. Null-safe
+          // by construction (resolveBookMetadataForIngest always returns a
+          // 3-field record; values may be null but the keys exist).
+          bookTitle: resolvedMetadata.title,
+          bookAuthor: resolvedMetadata.author,
+          metadataSource: resolvedMetadata.source,
         })
         .where(eq(tutorials.id, tutorialId))
         .run();
@@ -445,6 +466,60 @@ async function runAnchorExtraction(
       (err as Error).message,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Sprint D Phase 1 — book metadata resolution at ingest
+// ---------------------------------------------------------------------------
+//
+// Combines the PDF-embedded metadata extractor with the filename heuristic
+// fallback. The result drives the new tutorials.book_title / book_author /
+// metadata_source columns.
+//
+// Decision tree:
+//   1. PDF /Info or XMP yielded ANY non-null value (title or author) →
+//      use those, tag source as 'pdf-info' / 'pdf-xmp'. High-confidence.
+//   2. Neither PDF source yielded anything → re-run the filename heuristic
+//      on the S3 URL. If it gave us anything, tag 'filename' (low-confidence;
+//      keeps the UI's "Auto-detected" warning badge active).
+//   3. Filename heuristic also empty → tag 'none'.
+//
+// Returns 3-tuple suitable for direct insertion into the tutorials row.
+
+interface ResolvedBookMetadata {
+  title: string | null;
+  author: string | null;
+  source: 'pdf-info' | 'pdf-xmp' | 'filename' | 'none';
+}
+
+function resolveBookMetadataForIngest(
+  pdfMetadata: PdfMetadata,
+  s3Url: string,
+): ResolvedBookMetadata {
+  // Tier 1: PDF-embedded metadata. extractPdfMetadata only returns
+  // source !== 'none' when at least one of title/author was usable.
+  if (pdfMetadata.source !== 'none') {
+    return {
+      title: pdfMetadata.title,
+      author: pdfMetadata.author,
+      source: pdfMetadata.source,
+    };
+  }
+
+  // Tier 2: filename heuristic — keep parity with the legacy display path.
+  const fromFilename = bookMetadataFromS3Url(s3Url);
+  const filenameTitle = fromFilename.bookTitle.length > 0 ? fromFilename.bookTitle : null;
+  const filenameAuthor = fromFilename.author.length > 0 ? fromFilename.author : null;
+  if (filenameTitle !== null || filenameAuthor !== null) {
+    return {
+      title: filenameTitle,
+      author: filenameAuthor,
+      source: 'filename',
+    };
+  }
+
+  // Tier 3: nothing derivable. The UI will fall back to "Untitled tutorial".
+  return { title: null, author: null, source: 'none' };
 }
 
 // ---------------------------------------------------------------------------
