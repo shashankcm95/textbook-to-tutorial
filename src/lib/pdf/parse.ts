@@ -192,6 +192,37 @@ async function extractPage(pdfDoc: any, pageNumber: number): Promise<ParsedPage>
   } catch (err) {
     throw new PdfParseError(`getPage(${pageNumber}) failed: ${(err as Error).message}`, err);
   }
+
+  // PR-D: force font resolution before reading text content. pdfjs lazy-loads
+  // embedded fonts; until getOperatorList() (or render()) triggers the load,
+  // page.commonObjs.get(fontName) throws "object isn't resolved yet" — and
+  // content.styles[fontName].fontFamily ends up as a coarse CSS generic
+  // ("sans-serif" / "serif" / "monospace") that masks the actual embedded
+  // font name. Empirical (CTCI fresh-parse 2026-05-25): 100% of items got
+  // "sans-serif" even on code-dense pages where multiple distinct fonts ARE
+  // embedded (per-font ascent values differ by 0.05+, proving variation).
+  // Loading the operator list resolves the fonts so commonObjs.get(fontName)
+  // returns the real Font object with its .name = PostScript name (e.g.,
+  // CourierNewPSMT). Side effect: parses the page's content stream once.
+  // Cost is similar to getTextContent's already-existing parse, so the
+  // marginal overhead is ~1× current (not 2×) — both ops walk the same data.
+  // The OperatorList is itself a side effect we don't use; we drop the
+  // returned promise after awaiting it (its purpose is just to drive
+  // commonObjs resolution).
+  try {
+    await page.getOperatorList();
+  } catch (err) {
+    // Non-fatal: if operator-list parsing fails for a malformed page, we can
+    // still proceed with getTextContent's text — we'll just fall back to the
+    // unresolved fontFamily path (commonObjs.get will throw; resolveFontName
+    // catches and returns the styles-fallback string).
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[parse:page${pageNumber}] getOperatorList failed (continuing with unresolved fonts): ` +
+        (err as Error).message,
+    );
+  }
+
   let content: any;
   try {
     content = await page.getTextContent();
@@ -199,11 +230,39 @@ async function extractPage(pdfDoc: any, pageNumber: number): Promise<ParsedPage>
     throw new PdfParseError(`getTextContent(${pageNumber}) failed: ${(err as Error).message}`, err);
   }
 
-  return extractPageFromContent(
-    pageNumber,
-    content.items ?? [],
-    content.styles ?? {},
-  );
+  // PR-D: build a fontName → resolved-family map. For each item's fontName,
+  // try commonObjs.get(fontName).name first (the real PostScript name); fall
+  // back to content.styles[fontName].fontFamily on lookup failure.
+  const styles: Record<string, { fontFamily?: string }> = content.styles ?? {};
+  const items: Array<PdfTextItem> = content.items ?? [];
+  const fontNameToFamily = new Map<string, string | null>();
+  const uniqueFontNames = new Set<string>();
+  for (const it of items) {
+    if (it.fontName) uniqueFontNames.add(it.fontName);
+  }
+  for (const fontName of uniqueFontNames) {
+    let resolved: string | null = null;
+    try {
+      const fontObj = page.commonObjs.get(fontName);
+      if (fontObj && typeof fontObj === 'object') {
+        const name = (fontObj as { name?: string }).name;
+        if (typeof name === 'string' && name.length > 0) {
+          resolved = name;
+        }
+      }
+    } catch {
+      // Object not resolved — fall through to styles-based fallback.
+    }
+    if (!resolved) {
+      const family = styles[fontName]?.fontFamily;
+      if (typeof family === 'string' && family.length > 0) {
+        resolved = family;
+      }
+    }
+    fontNameToFamily.set(fontName, resolved);
+  }
+
+  return extractPageFromContent(pageNumber, items, fontNameToFamily);
 }
 
 /**
@@ -211,19 +270,30 @@ async function extractPage(pdfDoc: any, pageNumber: number): Promise<ParsedPage>
  * pdfDoc/page side effects) and returns the ParsedPage. Exported for unit
  * testing — production code should call extractPage with a real pdfDoc.
  *
- * PR-B: resolves per-item monospace flag from styles[fontName].fontFamily,
+ * PR-B: resolves per-item monospace flag from a fontName-to-family map,
  * then emits each paragraph with its kind classification. Items missing
- * fontName, missing style entry, or with no fontFamily default to
- * non-monospace (fail-open).
+ * fontName, items with no entry in the map, or items whose map entry is
+ * null default to non-monospace (fail-open).
+ *
+ * PR-D (2026-05-25): signature changed from
+ *   (pageNumber, items, styles: Record<string, {fontFamily?}>)
+ * to
+ *   (pageNumber, items, fontNameToFamily: Map<string, string|null>)
+ * so callers can supply real PostScript font names (resolved via
+ * page.commonObjs.get(fontName).name in extractPage) instead of pdfjs's
+ * coarse CSS-generic fontFamily output. Empirical impetus: CTCI fresh-
+ * parse showed every fontFamily collapsed to "sans-serif" — useless for
+ * monospace classification. The Map shape lets callers fill in real font
+ * names where pdfjs can't.
  */
 export function extractPageFromContent(
   pageNumber: number,
   items: ReadonlyArray<PdfTextItem>,
-  styles: Readonly<Record<string, { fontFamily?: string }>>,
+  fontNameToFamily: ReadonlyMap<string, string | null>,
 ): ParsedPage {
   const enriched: EnrichedItem[] = items.map((it) => {
     const fontName = it.fontName ?? '';
-    const fontFamily = fontName ? styles[fontName]?.fontFamily ?? null : null;
+    const fontFamily = fontName ? fontNameToFamily.get(fontName) ?? null : null;
     return {
       str: it.str ?? '',
       hasEOL: !!it.hasEOL,
