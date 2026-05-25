@@ -123,11 +123,11 @@ export async function extractPdfMetadata(pdfBuffer: Buffer): Promise<PdfMetadata
 
   let pdfDoc;
   try {
-    const data = new Uint8Array(
-      pdfBuffer.buffer,
-      pdfBuffer.byteOffset,
-      pdfBuffer.byteLength,
-    );
+    // COPY (not view) the buffer: pdfjs-dist's getDocument() detaches the
+    // underlying ArrayBuffer during loading, which leaves the caller's
+    // `pdfBuffer` empty for subsequent parsePdfBuffer() in worker.ts. A
+    // fresh-copy ArrayBuffer is the only correct shape here. DRIFT-test3-022.
+    const data = Uint8Array.from(pdfBuffer);
     const loadingTask = getDocument({
       data,
       verbosity: 0,
