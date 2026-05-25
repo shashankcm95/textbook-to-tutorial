@@ -27,15 +27,29 @@
  * (per ari's schema design). Used by the renderer to show the cited
  * paragraph in a side-popover when the user hovers a question/flashcard.
  *
- * @property page         - 1-based page number from the PDF
- * @property paragraphIdx - 0-based ordinal within the page (top-to-bottom)
- * @property text         - full paragraph text (UTF-8); used verbatim in the
- *                          proof-citation popover. May contain newlines.
+ * @property page                 - 1-based page number from the PDF
+ * @property paragraphIdx         - 0-based ordinal within the page (top-to-bottom)
+ * @property text                 - full paragraph text (UTF-8); used verbatim in the
+ *                                  proof-citation popover. May contain newlines.
+ * @property chapterParagraphIdx  - OPTIONAL. 0-based ordinal of this paragraph
+ *                                  WITHIN its chapter (not within its page).
+ *                                  Populated by the ingest worker after chapter
+ *                                  splitting (Sprint D Phase 3). Load-bearing
+ *                                  for voice-extract's chapter-opening weight
+ *                                  rule, which previously used the page-top
+ *                                  proxy (paragraphIdx ≤ 2) for lack of
+ *                                  chapter-boundary metadata at this layer.
+ *                                  Optional + additive: pre-Sprint-D-Phase-3
+ *                                  ingests have `source_paragraphs_json` rows
+ *                                  WITHOUT this field; voice-extract's
+ *                                  weighParagraph falls back to the page-top
+ *                                  proxy in that case.
  */
 export type SourceParagraph = {
   page: number;
   paragraphIdx: number;
   text: string;
+  chapterParagraphIdx?: number;
 };
 
 /**

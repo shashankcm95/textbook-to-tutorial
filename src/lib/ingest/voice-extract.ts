@@ -25,12 +25,11 @@
 //     the new sampler will run. That is by design.
 //   - sampleParagraphs() now weights each candidate before drawing:
 //       Rule 1 — Chapter-opening boost (3.0×): paragraphs near the start of
-//         a chapter section carry topic-frames and pushbacks. With only
-//         page-local paragraphIdx available (no chapter-boundary metadata
-//         in SourceParagraph), we use top-of-page (`paragraphIdx <= 2`) as
-//         the available proxy: empirically the same syntactic carriers
-//         cluster there because chapters/sections typically begin at a
-//         page break.
+//         a chapter section carry topic-frames and pushbacks. Sprint D
+//         Phase 3 (see below) plumbs TRUE chapter-first ordinals via
+//         SourceParagraph.chapterParagraphIdx; the page-top proxy
+//         (`paragraphIdx <= 2`) remains as a graceful-degradation fallback
+//         for pre-Phase-3 paragraphs that don't carry the new field.
 //       Rule 2 — Rhetorical-marker boost (2.0×): paragraphs containing
 //         "but", "however", "yet", em-dash/en-dash, or forward-pointers
 //         ("we will", "next section/chapter/lesson") — the syntactic
@@ -76,6 +75,35 @@
 //   - kb:architecture/discipline/stability-patterns §Fail-Fast — JSON parse
 //     errors throw `VoiceProfileParseError` (caller — via withRetry — gets
 //     one parse-retry, then surfaces).
+//
+// ───────────────────────────────────────────────────────────────────────────
+// Sprint D Phase 3 — chapter-firsts plumbing (PR following PR #24)
+// ───────────────────────────────────────────────────────────────────────────
+// T3.5 (above) had to use `paragraphIdx <= 2` (page-top) as a proxy for
+// chapter-firsts because no chapter-boundary metadata existed on
+// SourceParagraph at the voice-extract layer. PR #24's honest deviation:
+//
+//   "No chapterFirstParagraphIdx parameter. SourceParagraph only has
+//    page-local paragraphIdx — there is no chapter-boundary metadata at
+//    this layer. Used paragraphIdx <= 2 (page-top) as the available proxy."
+//
+// Sprint D Phase 3 closes that gap. The ingest worker now tags each
+// SourceParagraph with `chapterParagraphIdx` (0-based ordinal WITHIN its
+// chapter) before voice-extract is called. weighParagraph() prefers this
+// field when present and falls back to the page-top proxy when absent —
+// preserving backward compatibility with already-ingested tutorials whose
+// source_paragraphs_json predates the new field.
+//
+// SAMPLER_VERSION is intentionally NOT bumped on this change. The sampling
+// ALGORITHM is unchanged (same weights, same threshold, same A-Res draw);
+// only the INPUT DATA QUALITY improves. Bumping the version would force-
+// invalidate every cached voice profile in S3 with no behavioral change to
+// justify the cost — a cache thrash for a strictly-better input signal.
+//
+// The proxy path is now a graceful-degradation fallback rather than the
+// primary signal. After all production tutorials have been re-ingested
+// (or have failed the cache-hit visibility check at worker.ts:Wave-3
+// review H1) the proxy branch can be retired; tracked as future cleanup.
 
 import { openai } from '@/lib/openai/client';
 import { actualCost, isSupportedModel, UnknownModelError } from '@/lib/openai/cost';
@@ -240,7 +268,8 @@ export class VoiceProfileParseError extends Error {
 //
 // T3.5 — weighted-rhetorical sampling. See the header comment block for the
 // motivation; the rules implemented here are:
-//   - Chapter-opening (proxied by page-top, paragraphIdx <= 2): 3.0×
+//   - Chapter-opening (Sprint D Phase 3: TRUE chapterParagraphIdx <= 2 when
+//     available; PR #24 page-top proxy paragraphIdx <= 2 as fallback): 3.0×
 //   - Rhetorical-marker (but/however/yet/em-dash/forward-pointer):  2.0×
 //   - Epigraph (page-top, <40 words, no terminal period):           1.5×
 //
@@ -257,13 +286,21 @@ export class VoiceProfileParseError extends Error {
 export function weighParagraph(p: SourceParagraph): number {
   let w = 1.0;
 
-  // Rule 1: chapter-opening boost. SourceParagraph.paragraphIdx is
-  // page-local (0-based ordinal within a page), and we don't have
-  // chapter-boundary metadata at this layer. Using page-top as the
-  // available proxy: chapters/sections typically begin at a page break,
-  // so the same syntactic carriers (topic-frames, pushbacks) cluster in
-  // paragraphs at idx 0-2 of a page.
-  if (p.paragraphIdx <= CHAPTER_OPENING_PARAGRAPH_IDX_THRESHOLD) {
+  // Rule 1: chapter-opening boost.
+  //
+  // Sprint D Phase 3 — prefer the TRUE chapter-first ordinal
+  // (`chapterParagraphIdx`, populated by the ingest worker after chapter
+  // splitting). When absent (pre-Sprint-D-Phase-3 paragraphs, e.g., already-
+  // ingested tutorials whose source_paragraphs_json predates the new
+  // field), fall back to PR #24's page-top proxy — chapters/sections
+  // typically begin at a page break, so the same syntactic carriers
+  // (topic-frames, pushbacks) cluster in paragraphs at idx 0-2 of a page.
+  // Same threshold applies to both signals (≤ 2).
+  const isChapterOpening =
+    typeof p.chapterParagraphIdx === 'number'
+      ? p.chapterParagraphIdx <= CHAPTER_OPENING_PARAGRAPH_IDX_THRESHOLD
+      : p.paragraphIdx <= CHAPTER_OPENING_PARAGRAPH_IDX_THRESHOLD;
+  if (isChapterOpening) {
     w *= WEIGHT_CHAPTER_OPENING;
   }
 

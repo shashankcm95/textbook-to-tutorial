@@ -184,9 +184,23 @@ export async function ingestWorker(tutorialId: string): Promise<void> {
       // either extractor logs + continues; downstream consumers
       // (per-chapter generator, fidelity scorer) handle missing artifacts
       // by falling back to v3 prompt behavior.
+      //
+      // Sprint D Phase 3 — chapter-firsts plumbing: each chunk's paragraphs
+      // are tagged with `chapterParagraphIdx` (0-based position WITHIN the
+      // chunk) BEFORE the flatMap collapses chunk boundaries. This replaces
+      // T3.5 (PR #24)'s page-top proxy in voice-extract's weighParagraph()
+      // with TRUE chapter-first detection. Mapping is non-destructive (a new
+      // SourceParagraph object per item; original `chunk.paragraphs` is
+      // untouched so the downstream `cachedChunkParagraphs` write to
+      // source_paragraphs_json picks up the same field for backward-compat).
       const bodyParagraphs: SourceParagraph[] = manifest.chunks
         .filter((c) => c.classification === 'body')
-        .flatMap((c) => c.paragraphs);
+        .flatMap((c) =>
+          c.paragraphs.map((p, chapterParagraphIdx) => ({
+            ...p,
+            chapterParagraphIdx,
+          })),
+        );
       const glossaryTermStrings: string[] = glossary.terms.map((t) => t.term);
 
       await Promise.all([
@@ -238,8 +252,24 @@ export async function ingestWorker(tutorialId: string): Promise<void> {
       // Keep the parsed.chunks available for the inline-DB write below.
       // We attach them onto a side map keyed by idx so the DB insert can
       // populate source_paragraphs_json without re-reading from S3.
+      //
+      // Sprint D Phase 3: paragraphs are tagged with their within-chunk
+      // ordinal (`chapterParagraphIdx`) at this stage so the persisted
+      // source_paragraphs_json carries the same field that voice-extract
+      // sees. Future readers (e.g., per-chapter regeneration that wants the
+      // chapter-first signal) get it for free; the optional shape keeps
+      // pre-Phase-3 stored rows readable as-is.
       cachedChunkParagraphs = new Map(
-        manifest.chunks.map((c) => [c.idx, c.paragraphs] as const),
+        manifest.chunks.map(
+          (c) =>
+            [
+              c.idx,
+              c.paragraphs.map((p, chapterParagraphIdx) => ({
+                ...p,
+                chapterParagraphIdx,
+              })),
+            ] as const,
+        ),
       );
       cachedGlossaryTerms = glossary.terms;
     }
@@ -363,7 +393,7 @@ export async function ingestWorker(tutorialId: string): Promise<void> {
 // per-tutorial keyed map).
 
 let cachedChunkParagraphs:
-  | Map<number, Array<{ page: number; paragraphIdx: number; text: string }>>
+  | Map<number, SourceParagraph[]>
   | undefined;
 let cachedGlossaryTerms:
   | Array<{ term: string; definition: string; sourceParagraphRef: string }>

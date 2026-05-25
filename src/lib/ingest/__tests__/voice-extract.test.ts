@@ -260,6 +260,81 @@ describe('weighParagraph', () => {
     // chapter-opening fires; epigraph does NOT (>= 40 words).
     expect(weighParagraph(longOpener)).toBe(__TEST_ONLY.WEIGHT_CHAPTER_OPENING);
   });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Sprint D Phase 3 — chapter-firsts plumbing (preference + fallback)
+  //
+  // T3.5 (PR #24) used `paragraphIdx <= 2` (page-top) as a proxy for
+  // chapter-firsts because no chapter-boundary metadata existed on
+  // SourceParagraph. Sprint D Phase 3 adds `chapterParagraphIdx` (0-based
+  // ordinal within the chapter, populated by the ingest worker) and updates
+  // weighParagraph to PREFER that field when present and FALL BACK to the
+  // page-top proxy when absent.
+  //
+  // These tests pin the preference + fallback semantics so a future
+  // refactor of weighParagraph can't silently regress to either:
+  //   (a) the page-top-only behavior (loses the architectural fix), or
+  //   (b) the chapter-only behavior (breaks backward compat with
+  //       already-ingested tutorials whose source_paragraphs_json lacks
+  //       the new field).
+  // ─────────────────────────────────────────────────────────────────────
+
+  it('Sprint D Phase 3: prefers chapterParagraphIdx <= 2 (true chapter-first) for the boost', () => {
+    // chapterParagraphIdx 0 → boost fires regardless of page-local
+    // paragraphIdx. Use paragraphIdx 10 (NOT page-top) to prove the new
+    // field is the actual signal driving the boost.
+    const trueChapterFirst: SourceParagraph = {
+      page: 7,
+      paragraphIdx: 10, // not page-top — the page-top proxy WOULD NOT fire here
+      text: 'A plain sentence that ends with a period and contains no markers at all today.',
+      chapterParagraphIdx: 0, // true chapter-first
+    };
+    expect(weighParagraph(trueChapterFirst)).toBe(__TEST_ONLY.WEIGHT_CHAPTER_OPENING);
+  });
+
+  it('Sprint D Phase 3: does NOT boost when chapterParagraphIdx > 2 even at page-top', () => {
+    // chapterParagraphIdx 3 → NOT a chapter-first. paragraphIdx 0 (page-top)
+    // is the kind of paragraph the OLD proxy would have boosted; the new
+    // preference rule correctly skips it because the TRUE signal says
+    // "mid-chapter, just happens to land at page-top".
+    const midChapterAtPageTop: SourceParagraph = {
+      page: 7,
+      paragraphIdx: 0, // page-top — the OLD page-top proxy WOULD HAVE fired here
+      text: 'A plain sentence that ends with a period and contains no markers at all today.',
+      chapterParagraphIdx: 3, // truly mid-chapter
+    };
+    // No boost: weight is exactly the 1.0× baseline. Confirms the new
+    // field WINS over the page-top heuristic when both are present.
+    expect(weighParagraph(midChapterAtPageTop)).toBe(1.0);
+  });
+
+  it('Sprint D Phase 3 fallback: page-top proxy still fires when chapterParagraphIdx is absent', () => {
+    // Pre-Phase-3 paragraph: no `chapterParagraphIdx` (undefined).
+    // paragraphIdx 1 → page-top fallback fires (≤ 2). This is the backward
+    // compatibility path: an already-ingested tutorial whose
+    // source_paragraphs_json was written before the new field existed
+    // continues to get the chapter-opening boost via the proxy.
+    const legacyPageTop: SourceParagraph = {
+      page: 4,
+      paragraphIdx: 1, // page-top → proxy fires
+      text: 'A plain sentence that ends with a period and contains no markers at all today.',
+      // chapterParagraphIdx: intentionally undefined (legacy shape)
+    };
+    expect(weighParagraph(legacyPageTop)).toBe(__TEST_ONLY.WEIGHT_CHAPTER_OPENING);
+  });
+
+  it('Sprint D Phase 3 fallback: no boost when chapterParagraphIdx is absent AND not page-top', () => {
+    // Pre-Phase-3 paragraph, mid-page. Neither the new field nor the
+    // proxy fires → baseline 1.0 weight. Distinguishes the fallback from
+    // an unconditional boost.
+    const legacyMidPage: SourceParagraph = {
+      page: 4,
+      paragraphIdx: 10, // not page-top, not chapter-first via proxy
+      text: 'A plain sentence that ends with a period and contains no markers at all today.',
+      // chapterParagraphIdx: intentionally undefined (legacy shape)
+    };
+    expect(weighParagraph(legacyMidPage)).toBe(1.0);
+  });
 });
 
 // ───────────────────────────────────────────────────────────────────────────
