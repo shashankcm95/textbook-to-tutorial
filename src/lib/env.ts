@@ -158,7 +158,38 @@ function parseBootEnv() {
   return result.data;
 }
 
-export const env = parseBootEnv();
+const bootEnv = parseBootEnv();
+
+// Sprint E Tier 2 (2026-05-24): make COST_CAP_USD re-readable from process.env
+// at access time (not just at boot). Variant manifests' `env` blocks mutate
+// `process.env` via applyVariant() — without this getter the variant's
+// COST_CAP_USD was silently ignored because `env` is a frozen value-object
+// parsed once at module init.
+//
+// Behavior:
+//   - If process.env.COST_CAP_USD is present AND parses to a positive number,
+//     return that fresh value.
+//   - Otherwise fall back to the boot-parsed default (1.0) or whatever was in
+//     process.env at boot.
+//
+// Tests can set process.env.COST_CAP_USD = '5' to override per-test without
+// re-importing the module or restarting the process.
+export const env: typeof bootEnv = Object.defineProperty(
+  { ...bootEnv },
+  'COST_CAP_USD',
+  {
+    enumerable: true,
+    configurable: true,
+    get(): number {
+      const raw = process.env.COST_CAP_USD;
+      if (raw !== undefined && raw !== '') {
+        const parsed = Number(raw);
+        if (Number.isFinite(parsed) && parsed > 0) return parsed;
+      }
+      return bootEnv.COST_CAP_USD;
+    },
+  },
+) as typeof bootEnv;
 
 /**
  * Lazy S3 env loader — only call from the s3-fetch boundary.

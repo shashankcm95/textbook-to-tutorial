@@ -34,10 +34,48 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 
+// ─── Auto-load .env from CWD BEFORE any module that reads process.env ─────────
+//
+// Sprint E Tier 2 — round-3 PoC dogfood (2026-05-24) found `pnpm eval:run`
+// required users to manually `set -a; source .env; set +a` first; this
+// auto-load eliminates the footgun. Pure-Node implementation (no dotenv dep)
+// is idempotent: it never overwrites an already-set process.env key, so any
+// vars passed in on the CLI ("FOO=bar pnpm eval:run") still win.
+//
+// IMPORTANT: this runs BEFORE the imports below so that `src/lib/env.ts` —
+// which `parseBootEnv()`s at module load — sees the .env values.
+function loadDotEnvIfPresent(): void {
+  const envPath = path.resolve(process.cwd(), '.env');
+  if (!fs.existsSync(envPath)) return;
+  const content = fs.readFileSync(envPath, 'utf-8');
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    let value = trimmed.slice(eqIdx + 1).trim();
+    // Strip a single layer of surrounding double or single quotes.
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (!(key in process.env)) {
+      process.env[key] = value;
+    }
+  }
+}
+loadDotEnvIfPresent();
+
 import { runEvalHarness } from '../src/lib/eval/runner';
 import type { NarrativeSource } from '../src/lib/eval/narratives';
 import type { RatingChatClient } from '../src/lib/eval/persona';
-import type { VariantManifest } from '../src/lib/eval/variant';
+import {
+  requireTutorialIdForDbMode,
+  type VariantManifest,
+} from '../src/lib/eval/variant';
 
 interface CliArgs {
   runId: string;
@@ -146,7 +184,9 @@ async function buildNarrativeSourceFactory(
 
   return (variant) => ({
     type: 'database',
-    tutorialId: variant.tutorial_id,
+    // Sprint E Tier 2 — runtime gate: schema now makes tutorial_id optional
+    // (fs mode doesn't need it); this throws if db mode is missing the field.
+    tutorialId: requireTutorialIdForDbMode(variant),
     db: {
       selectChapter: (tutorialId, ordinal) => {
         const rows = db

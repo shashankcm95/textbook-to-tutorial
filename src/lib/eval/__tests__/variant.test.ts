@@ -13,6 +13,7 @@ import {
   readVariantManifest,
   applyVariant,
   revertVariant,
+  requireTutorialIdForDbMode,
   type VariantManifest,
 } from '../variant';
 
@@ -51,6 +52,41 @@ describe('VariantManifestSchema', () => {
         chapter_range: [5, 2],
       }),
     ).toThrow();
+  });
+
+  // Sprint E Tier 2 (2026-05-24): tutorial_id is now optional at the schema
+  // level — required only at runtime in db mode (see requireTutorialIdForDbMode
+  // tests below). Round-3 PoC dogfood found duplicating tutorial_id across
+  // both variants purely to satisfy the schema was a footgun in fs mode.
+  it('accepts a manifest WITHOUT tutorial_id (fs mode use case)', () => {
+    const parsed = VariantManifestSchema.parse({
+      name: 'fs-only-variant',
+      chapter_range: [0, 3],
+    });
+    expect(parsed.name).toBe('fs-only-variant');
+    expect(parsed.tutorial_id).toBeUndefined();
+    expect(parsed.chapter_range).toEqual([0, 3]);
+  });
+});
+
+describe('requireTutorialIdForDbMode', () => {
+  it('returns the tutorial_id when present', () => {
+    const variant: VariantManifest = {
+      name: 'v',
+      tutorial_id: 'tut-abc',
+      chapter_range: [0, 0],
+    };
+    expect(requireTutorialIdForDbMode(variant)).toBe('tut-abc');
+  });
+
+  it('throws a clear error naming the variant when tutorial_id is absent', () => {
+    const variant: VariantManifest = {
+      name: 'fs-variant',
+      chapter_range: [0, 0],
+    };
+    expect(() => requireTutorialIdForDbMode(variant)).toThrow(
+      /fs-variant.*tutorial_id.*--narratives-from=db/s,
+    );
   });
 });
 

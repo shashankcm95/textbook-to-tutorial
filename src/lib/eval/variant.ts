@@ -66,8 +66,19 @@ export const VariantManifestSchema = z.object({
    */
   env: z.record(z.string(), z.string()).optional(),
 
-  /** The tutorial whose chapters this variant regenerates / reads. */
-  tutorial_id: z.string().min(1),
+  /**
+   * The tutorial whose chapters this variant regenerates / reads.
+   *
+   * Sprint E Tier 2 (2026-05-24): made optional at the schema level. When the
+   * harness runs `--narratives-from=fs`, the DB is never queried and this
+   * field is silently unused — round-3 PoC dogfood had to duplicate the same
+   * id across both variants purely to satisfy schema validation.
+   *
+   * Runtime enforcement: `requireTutorialIdForDbMode()` (called by runner /
+   * narrative-source factory) throws a clear error if a variant lacks
+   * `tutorial_id` when the run is `--narratives-from=db`.
+   */
+  tutorial_id: z.string().min(1).optional(),
 
   /**
    * [startInclusive, endInclusive] chapter ordinals to evaluate. Default
@@ -94,6 +105,28 @@ export function readVariantManifest(filePath: string): VariantManifest {
   const raw = fs.readFileSync(filePath, 'utf8');
   const parsed = JSON.parse(raw) as unknown;
   return VariantManifestSchema.parse(parsed);
+}
+
+/**
+ * Sprint E Tier 2 (2026-05-24): assert that the variant carries a
+ * `tutorial_id` when the harness will query the DB. Schema makes the field
+ * optional (fs mode doesn't need it); this is the runtime gate for db mode.
+ *
+ * Throws with a single clear message naming the offending variant + the
+ * mode that requires the field. Returns the narrowed string for ergonomic
+ * use at the call site.
+ */
+export function requireTutorialIdForDbMode(
+  variant: VariantManifest,
+): string {
+  if (!variant.tutorial_id) {
+    throw new Error(
+      `variant "${variant.name}": tutorial_id is required when ` +
+        `--narratives-from=db. Add "tutorial_id" to the manifest, or run ` +
+        `with --narratives-from=fs --narratives-dir <dir> to read from disk.`,
+    );
+  }
+  return variant.tutorial_id;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
