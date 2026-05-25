@@ -78,6 +78,9 @@ function makeAnchor(
 // Subset of fidelity rules that MUST survive every call (regression canaries).
 // Sprint C Phase 1: extended with Rules D + E (Professor round-2 HIGH #2 —
 // silent-delete risk on the negative-rules block shipped in PR #22).
+// Sprint E Tier 1: extended with Rules 7 + 8 (CTCI ingest audit predicted ~0%
+// code-preservation; image-handling audit measured 100% figure drop across
+// 588 chapter rows — both gaps land here as silent-delete canaries).
 const EXISTING_RULE_FRAGMENTS = [
   'FIDELITY RULES',
   '1. PRESERVE CONCRETE ANCHORS.',
@@ -86,6 +89,8 @@ const EXISTING_RULE_FRAGMENTS = [
   '4. PRESERVE NAMED IDIOMS, HUMOR, AND SIGNATURE PHRASES.',
   '5. PRESERVE THE "BUT CLAUSE" PATTERN.',
   '6. PRESERVE IMPLEMENTATION-SPECIFIC SEARCH-TERM ANCHORS.',
+  '7. PRESERVE CODE LISTINGS,',
+  '8. PRESERVE FIGURE REFERENCES.',
   'NEGATIVE RULES (do NOT do these):',
   'A. NO LLM BOILERPLATE OPENERS OR CLOSERS.',
   'B. NO GENERIC ABSTRACTION-FIRST INTROS.',

@@ -77,7 +77,18 @@ export interface TutorialOutlineProps {
 // Part-grouping helper
 // ───────────────────────────────────────────────────────────────────────────
 
-const PART_PREFIX_RE = /^(Part\s+[IVXLCDM]+)[\.\s:]/i;
+// Sprint E Tier 1: accept BOTH the "Part I." prefix (DDIA convention)
+// AND bare-Roman ("I. The Interview Process" — CTCI convention). The
+// CTCI ingest audit found CTCI fell back to flat "All chapters" because
+// the original regex required the literal "Part " prefix. The bare-Roman
+// branch normalizes the captured numeral (group 2) into a synthetic
+// "Part <NUMERAL>" label so groups render consistently regardless of
+// source convention. False-positive safeguard ("Iota", "Ivory") is the
+// trailing `[.\s:]` character class — a single Roman letter that begins
+// a regular English word never has that separator immediately after it.
+// The grouping logic's existing `distinctParts.size >= 2` guard remains
+// the second line of defense against books that use neither convention.
+export const PART_PREFIX_RE = /^(?:(Part\s+([IVXLCDM]+))|([IVXLCDM]+))[\.\s:]/i;
 
 interface PartGroup {
   label: string; // e.g., "Part I", or "All chapters" for the fallback
@@ -85,10 +96,18 @@ interface PartGroup {
 }
 
 function groupByPart(chapters: TutorialOutlineChapter[]): PartGroup[] {
-  // First pass: tag each chapter with its detected Part (or null).
+  // First pass: tag each chapter with its detected Part (or null). When the
+  // bare-Roman branch fires (group 3), synthesize a "Part <NUMERAL>" label so
+  // the rendered group heading is consistent with the explicit-Part case.
   const tagged = chapters.map((c) => {
     const match = c.title.match(PART_PREFIX_RE);
-    return { chapter: c, part: match ? match[1] : null };
+    if (!match) return { chapter: c, part: null };
+    const explicitPart = match[1]; // "Part I" (full)
+    const bareNumeral = match[3]; // "I" (when no "Part " prefix)
+    const part =
+      explicitPart ??
+      (bareNumeral ? `Part ${bareNumeral.toUpperCase()}` : null);
+    return { chapter: c, part };
   });
   const distinctParts = new Set(tagged.map((t) => t.part).filter((p): p is string => p !== null));
   // Fallback path: when fewer than two distinct Part prefixes are present,

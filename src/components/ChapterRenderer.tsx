@@ -366,6 +366,43 @@ export function ChapterRenderer({ narrative, sourceParagraphs, isFirstLesson = f
       // The `inline` flag (true for inline `<code>` like `foo`) is
       // explicitly passed-through unchanged — inline code never becomes
       // a diagram, only fenced blocks.
+      // Sprint E Tier 1: <figure> wrapper + brand-themed img override.
+      //
+      // Render-prep for future figure-extraction work — today no markdown image
+      // syntax (`![alt](src)`) is emitted into narratives, so this override
+      // stays dormant. The image-handling audit (588 chapter rows scanned)
+      // measured 100% figure drop empirically; FIDELITY rule 8 (added in this
+      // same PR) instructs the LLM to reference figures by label, which is
+      // step 1. Step 2 will be a future ingest pass that materializes Figure
+      // X-Y into `![Figure X-Y caption](s3://.../figure-x-y.png)` markdown.
+      // When that lands, no ChapterRenderer change will be needed — this slot
+      // is already brand-themed (paper-edge border + ink-muted caption) and
+      // wraps each image in a semantic <figure>/<figcaption> pair.
+      //
+      // Why eslint-disable next/no-img-element: the markdown source URL is
+      // unknown at build time (resolved from S3 at runtime) so next/image
+      // would require a dynamic loader; <img> with explicit max-width is the
+      // simpler safe choice for the dormant render-prep slot. Revisit if
+      // figure-extraction lands a known origin we can configure with
+      // next.config images.remotePatterns.
+      img: ({ src, alt, title }: { src?: string; alt?: string; title?: string }) => (
+        <figure className="my-stanza">
+          {src ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={src}
+              alt={alt ?? ''}
+              title={title}
+              className="mx-auto max-w-full rounded-md border border-paper-edge shadow-paper-sm"
+            />
+          ) : null}
+          {alt ? (
+            <figcaption className="mt-2 text-center font-sans text-caption italic text-ink-muted">
+              {alt}
+            </figcaption>
+          ) : null}
+        </figure>
+      ),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       code: ({ inline, className, children, ...rest }: any) => {
         const isMermaid =
