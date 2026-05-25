@@ -105,6 +105,11 @@ const optional = z.object({
   DB_PATH: z.string().default('./data/tutorials.db'),
   DATABASE_URL: z.string().default('file:./data/tutorials.db'),
   COST_CAP_USD: z.coerce.number().positive().default(1.0),
+  // PR-C: ingest-time safety cap on PDF buffer size. Default 50 MB matches
+  // s3.ts's streamToBufferWithCap default. Operators can bump for outsize
+  // books (e.g., CTCI 6th ed @ 52 MB, large O'Reilly @ 80-100 MB) via the
+  // MAX_PDF_BYTES env var. Hard cap: positive integer in bytes.
+  MAX_PDF_BYTES: z.coerce.number().int().positive().default(50 * 1024 * 1024),
 });
 
 // ---------------------------------------------------------------------------
@@ -135,6 +140,7 @@ const BOOT_KEYS = [
   'DB_PATH',
   'DATABASE_URL',
   'COST_CAP_USD',
+  'MAX_PDF_BYTES',
 ] as const;
 
 const S3_KEYS = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION'] as const;
@@ -166,27 +172,44 @@ const bootEnv = parseBootEnv();
 // COST_CAP_USD was silently ignored because `env` is a frozen value-object
 // parsed once at module init.
 //
-// Behavior:
-//   - If process.env.COST_CAP_USD is present AND parses to a positive number,
-//     return that fresh value.
-//   - Otherwise fall back to the boot-parsed default (1.0) or whatever was in
-//     process.env at boot.
+// PR-C (2026-05-25) extends the same live-read pattern to MAX_PDF_BYTES so
+// operators can bump the ingest size cap (default 50 MB) via the
+// MAX_PDF_BYTES env var without code surgery. Same fail-open shape:
+// invalid / blank / non-positive values fall back to the boot default.
 //
-// Tests can set process.env.COST_CAP_USD = '5' to override per-test without
-// re-importing the module or restarting the process.
-export const env: typeof bootEnv = Object.defineProperty(
+// Tests can set process.env.{COST_CAP_USD,MAX_PDF_BYTES} = '5' to override
+// per-test without re-importing the module or restarting the process.
+export const env: typeof bootEnv = Object.defineProperties(
   { ...bootEnv },
-  'COST_CAP_USD',
   {
-    enumerable: true,
-    configurable: true,
-    get(): number {
-      const raw = process.env.COST_CAP_USD;
-      if (raw !== undefined && raw !== '') {
-        const parsed = Number(raw);
-        if (Number.isFinite(parsed) && parsed > 0) return parsed;
-      }
-      return bootEnv.COST_CAP_USD;
+    COST_CAP_USD: {
+      enumerable: true,
+      configurable: true,
+      get(): number {
+        const raw = process.env.COST_CAP_USD;
+        if (raw !== undefined && raw !== '') {
+          const parsed = Number(raw);
+          if (Number.isFinite(parsed) && parsed > 0) return parsed;
+        }
+        return bootEnv.COST_CAP_USD;
+      },
+    },
+    MAX_PDF_BYTES: {
+      enumerable: true,
+      configurable: true,
+      get(): number {
+        const raw = process.env.MAX_PDF_BYTES;
+        if (raw !== undefined && raw !== '') {
+          const parsed = Number(raw);
+          // Require integer + positive — partial bytes are nonsense; a 0 or
+          // negative value would short-circuit any real PDF instantly, so
+          // fail-open to the boot default protects against typos.
+          if (Number.isFinite(parsed) && parsed > 0 && Number.isInteger(parsed)) {
+            return parsed;
+          }
+        }
+        return bootEnv.MAX_PDF_BYTES;
+      },
     },
   },
 ) as typeof bootEnv;

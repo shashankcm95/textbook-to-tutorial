@@ -30,6 +30,7 @@ import { createHash } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { db } from '@/db/client';
 import { tutorials, chapters, glossaryTerms, skippedSections } from '@/db/schema';
+import { env } from '@/lib/env';
 import { fetchPdfFromS3 } from '@/lib/s3';
 import { parsePdfBuffer } from '@/lib/pdf/parse';
 import { classifyOutline } from './classifier';
@@ -59,7 +60,12 @@ import {
 } from '@/lib/s3-chunks';
 import type { SourceParagraph } from '@/lib/types';
 
-const MAX_PDF_BYTES = 50 * 1024 * 1024; // 50 MB — matches s3.ts default cap
+// PR-C: ingest-size cap is now env-driven via env.MAX_PDF_BYTES (default
+// 50 MB matches s3.ts's streamToBufferWithCap default). Operators can bump
+// for outsize books (CTCI 6th ed @ 52 MB, large O'Reilly @ 80-100 MB) by
+// exporting MAX_PDF_BYTES=104857600 etc. The getter on env reads fresh
+// from process.env per call, so tests + variant manifests can override at
+// runtime without restarting the process.
 
 /**
  * Run the ingest pipeline for a tutorial id.
@@ -90,7 +96,7 @@ export async function ingestWorker(tutorialId: string): Promise<void> {
 
   // ── Phase 2: fetch + hash (always needed for sha256 cache key) ────────
   try {
-    const { buffer } = await fetchPdfFromS3(tutorial.sourceS3Url, MAX_PDF_BYTES);
+    const { buffer } = await fetchPdfFromS3(tutorial.sourceS3Url, env.MAX_PDF_BYTES);
     const sha256 = createHash('sha256').update(buffer).digest('hex');
     const bucket = resolveChunksBucket(tutorial.sourceS3Url);
 
