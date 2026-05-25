@@ -358,13 +358,28 @@ export function StreamingClient(props: StreamingClientProps) {
   const [quizAttemptedByChapter, setQuizAttemptedByChapter] = useState<Map<string, boolean>>(
     () => new Map(),
   );
-  const markQuizAttempted = useCallback((chapterId: string) => {
+  // Sprint C Phase 2: per-chapter quiz score (0..1 fraction). Populated when
+  // the user clicks "Check answers". Used by MarkCompleteButton to render the
+  // brand-fade halo when score ≥ 0.8 — a celebratory affordance that the user
+  // earned via the quiz, not a logic change to the gate (the gate stays
+  // attempt-once, not pass-required).
+  const [quizScoreByChapter, setQuizScoreByChapter] = useState<Map<string, number>>(
+    () => new Map(),
+  );
+  const markQuizAttempted = useCallback((chapterId: string, scorePct?: number) => {
     setQuizAttemptedByChapter((prev) => {
       if (prev.get(chapterId) === true) return prev;
       const next = new Map(prev);
       next.set(chapterId, true);
       return next;
     });
+    if (typeof scorePct === 'number') {
+      setQuizScoreByChapter((prev) => {
+        const next = new Map(prev);
+        next.set(chapterId, scorePct);
+        return next;
+      });
+    }
   }, []);
 
   /**
@@ -747,7 +762,9 @@ export function StreamingClient(props: StreamingClientProps) {
                               <QuizQuestions
                                 questions={c.parsedQuestions}
                                 sourceParagraphs={c.sourceParagraphs}
-                                onAttempt={() => markQuizAttempted(c.id)}
+                                onAttempt={(scorePct) =>
+                                  markQuizAttempted(c.id, scorePct)
+                                }
                               />
                             ) : null}
                             {c.parsedFlashcards && c.parsedFlashcards.length > 0 ? (
@@ -764,6 +781,9 @@ export function StreamingClient(props: StreamingClientProps) {
                                   hasQuiz && !quizAttempted
                                     ? 'Attempt the quiz above to unlock'
                                     : undefined
+                                }
+                                scoreHigh={
+                                  (quizScoreByChapter.get(c.id) ?? 0) >= 0.8
                                 }
                               />
                             ) : alreadyMarkedComplete ? (
@@ -896,6 +916,46 @@ interface QuizQuestionsProps {
 }
 
 /**
+ * Sprint C Phase 2 — score-band lookup. Returns a label + pill className +
+ * 1-sentence encouragement based on the fraction-correct. Bands aligned with
+ * the Mark-Complete halo threshold (0.8) and natural pedagogical inflections.
+ *
+ * Pure function — easy to unit-test independently of React.
+ */
+function computeScoreBand(scorePct: number): {
+  label: string;
+  pillClass: string;
+  encouragement: string;
+} {
+  if (scorePct >= 1) {
+    return {
+      label: '✨ Perfect score',
+      pillClass: 'bg-success-fade text-success',
+      encouragement: 'Time to mark the chapter complete.',
+    };
+  }
+  if (scorePct >= 0.8) {
+    return {
+      label: 'Great work!',
+      pillClass: 'bg-success-fade text-success',
+      encouragement: "You're internalizing the material.",
+    };
+  }
+  if (scorePct >= 0.5) {
+    return {
+      label: 'Solid foundation',
+      pillClass: 'bg-brand-fade text-brand',
+      encouragement: 'Most key concepts are sticking.',
+    };
+  }
+  return {
+    label: 'Keep going',
+    pillClass: 'bg-warn-fade text-warn',
+    encouragement: 'Review the explanations below and try again.',
+  };
+}
+
+/**
  * Persona-Sprint-A T2.6: make the quiz interactive + report attempt status.
  *
  * Pre-Sprint-A behavior was an inert answer key in a `<details>` block —
@@ -918,7 +978,12 @@ interface QuizQuestionsProps {
  * exposes interactive controls rather than a cheat sheet.
  */
 interface QuizQuestionsInteractiveProps extends QuizQuestionsProps {
-  onAttempt?: () => void;
+  /**
+   * Sprint C Phase 2: onAttempt now reports the score fraction (0..1) so the
+   * parent can render the Mark Complete halo when score ≥ 0.8. Optional
+   * arg keeps back-compat with the T2.6 attempt-once signature.
+   */
+  onAttempt?: (scorePct: number) => void;
 }
 
 function QuizQuestions({ questions, onAttempt }: QuizQuestionsInteractiveProps) {
@@ -927,16 +992,6 @@ function QuizQuestions({ questions, onAttempt }: QuizQuestionsInteractiveProps) 
     questions.map(() => -1),
   );
   const [checked, setChecked] = useState(false);
-
-  // T2.6 hook: fire `onAttempt` exactly once, when the user first reveals
-  // the answers. Subsequent clicks (e.g., re-checks after changing a
-  // selection) don't refire because the parent only cares whether the
-  // chapter has been engaged with at all.
-  const handleCheck = useCallback(() => {
-    if (checked) return;
-    setChecked(true);
-    onAttempt?.();
-  }, [checked, onAttempt]);
 
   const handleSelect = useCallback((qIdx: number, optIdx: number) => {
     setSelected((prev) => {
@@ -956,6 +1011,36 @@ function QuizQuestions({ questions, onAttempt }: QuizQuestionsInteractiveProps) 
       )
     : 0;
   const answeredCount = selected.filter((s) => s >= 0).length;
+  const scorePct = questions.length > 0 ? correctCount / questions.length : 0;
+
+  // T2.6 hook: fire `onAttempt` exactly once, when the user first reveals
+  // the answers. Subsequent clicks (e.g., re-checks after changing a
+  // selection) don't refire because the parent only cares whether the
+  // chapter has been engaged with at all. Phase 2: also reports the score
+  // fraction so the parent can light the Mark Complete halo.
+  //
+  // We recompute earned here (not reuse `correctCount` from the outer scope)
+  // because `correctCount` is gated on `checked`, which only flips after
+  // setChecked(true). The render-derived `correctCount` becomes valid on
+  // the NEXT render; this onAttempt call happens on the click handler
+  // (current render), so we score from `selected` directly.
+  const handleCheck = useCallback(() => {
+    if (checked) return;
+    setChecked(true);
+    const earned = selected.reduce<number>(
+      (acc, optIdx, qIdx) =>
+        acc + (optIdx === questions[qIdx]?.correctIndex ? 1 : 0),
+      0,
+    );
+    const earnedPct = questions.length > 0 ? earned / questions.length : 0;
+    onAttempt?.(earnedPct);
+  }, [checked, onAttempt, questions, selected]);
+
+  // Sprint C Phase 2 — score celebration band. Pill color + headline +
+  // encouragement vary by score quartile. Bands kept conservative: 0.5 and
+  // 0.8 are the natural pedagogical thresholds (half-right means most
+  // concepts engaged; 80% is the Mark-Complete-halo threshold).
+  const scoreBand = computeScoreBand(scorePct);
 
   return (
     <details className="mt-6 rounded border border-border bg-card/40" open={checked}>
@@ -967,6 +1052,35 @@ function QuizQuestions({ questions, onAttempt }: QuizQuestionsInteractiveProps) 
           </span>
         ) : null}
       </summary>
+      {/*
+        Sprint C Phase 2 — Score celebration banner. Sits ABOVE the question
+        list. Only renders post-check. Pill rating + headline + 1-sentence
+        encouragement vary by quartile. The whole banner is `aria-live=polite`
+        so screen-reader users get the result spoken as soon as they click
+        "Check answers" without us having to manage focus rings.
+      */}
+      {checked ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="quiz-celebrate mx-4 mt-3 flex items-center justify-between gap-3 rounded-md border border-paper-edge bg-paper-deep px-4 py-3"
+        >
+          <div className="min-w-0">
+            <div className="flex items-baseline gap-2">
+              <span className="font-display text-h2 text-ink">
+                {correctCount}
+                <span className="text-ink-faint">/{questions.length}</span>
+              </span>
+              <span
+                className={`inline-flex items-center rounded-full px-2 py-0.5 font-mono text-micro uppercase tracking-wider ${scoreBand.pillClass}`}
+              >
+                {scoreBand.label}
+              </span>
+            </div>
+            <p className="mt-1 text-xs text-ink-muted">{scoreBand.encouragement}</p>
+          </div>
+        </div>
+      ) : null}
       <ol className="space-y-5 px-4 py-3 text-sm">
         {questions.map((q, i) => {
           const userPick = selected[i] ?? -1;
@@ -1126,6 +1240,13 @@ interface MarkCompleteButtonProps {
   disabled?: boolean;
   /** Human-readable reason for the disabled state; shown alongside the button. */
   disabledReason?: string;
+  /**
+   * Sprint C Phase 2: when the user's quiz score is ≥ 0.8, render a brand-
+   * fade halo / subtle pulse to draw attention. Does NOT change button logic;
+   * only its appearance. Wired via data-score-high attribute + globals.css
+   * utility.
+   */
+  scoreHigh?: boolean;
 }
 
 function MarkCompleteButton({
@@ -1135,6 +1256,7 @@ function MarkCompleteButton({
   onSuccess,
   disabled,
   disabledReason,
+  scoreHigh,
 }: MarkCompleteButtonProps) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1180,7 +1302,12 @@ function MarkCompleteButton({
         // tech users get the same information as sighted users.
         aria-disabled={isDisabled}
         title={disabled === true && disabledReason ? disabledReason : undefined}
-        className="rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+        // Sprint C Phase 2: data-score-high="true" lights the brand-fade halo
+        // via the .mark-complete-celebrate utility in globals.css. The
+        // attribute is set when the user's quiz score ≥ 0.8 — purely visual,
+        // logic-orthogonal.
+        data-score-high={scoreHigh === true ? 'true' : undefined}
+        className="mark-complete-celebrate rounded bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {submitting ? 'Marking complete…' : 'Mark complete & unlock next'}
       </button>

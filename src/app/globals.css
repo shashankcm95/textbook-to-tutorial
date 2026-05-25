@@ -258,6 +258,48 @@
   .duration-base    { transition-duration: 180ms; }
   .duration-slow    { transition-duration: 320ms; }
   .duration-ceremony{ transition-duration: 480ms; }
+
+  /*
+   * ── Sprint C Phase 2 — popover + score-celebration motion ───────────────
+   *
+   * .citation-popover-content: Radix Popover entrance. Radix sets data-state
+   *   on the content element ("open" / "closed"). We animate the open state.
+   *   Reduced-motion gate is the global @media block below — it neutralizes
+   *   transition + animation durations.
+   *
+   * .quiz-celebrate: score banner entrance (fade + slide-down). Fires on
+   *   mount (when `checked` flips true) since the banner is conditional.
+   *
+   * .mark-complete-celebrate[data-score-high="true"]: brand-fade halo via a
+   *   subtle box-shadow ring + slow breathing pulse. Communicates "the user
+   *   earned this" without becoming distracting; lifts only when the data
+   *   attribute is present.
+   */
+  .citation-popover-content[data-state='open'] {
+    animation: cb-pop-in 180ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+  .quiz-celebrate {
+    animation: cb-fade-slide 240ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+  .mark-complete-celebrate[data-score-high='true'] {
+    box-shadow: 0 0 0 3px hsl(var(--brand-fade)), 0 0 0 6px hsl(var(--brand) / 0.12);
+    animation: cb-halo-pulse 2.4s ease-in-out infinite;
+  }
+}
+
+@keyframes cb-pop-in {
+  from { opacity: 0; transform: translateY(4px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0)   scale(1);    }
+}
+
+@keyframes cb-fade-slide {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0);    }
+}
+
+@keyframes cb-halo-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px hsl(var(--brand-fade)), 0 0 0 6px hsl(var(--brand) / 0.12); }
+  50%      { box-shadow: 0 0 0 3px hsl(var(--brand-fade)), 0 0 0 8px hsl(var(--brand) / 0.20); }
 }
 
 /*

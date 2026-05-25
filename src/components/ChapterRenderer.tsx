@@ -51,8 +51,19 @@ import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import type { SourceParagraph } from '@/lib/types';
 import { CitationModal } from './CitationModal';
+import { CitationPopover } from './CitationPopover';
 import { LessonCanvas } from './LessonCanvas';
 import { MermaidDiagram } from './MermaidDiagram';
+
+/**
+ * Sprint C Phase 2 — popover vs modal threshold. Citations covering 1-2 source
+ * paragraphs open in the inline Radix Popover (Stripe-Press marginalia
+ * convention); citations covering 3+ paragraphs fall through to the full
+ * <CitationModal> because a popover would be too cramped to render the
+ * volume of source text usefully. The UX-designer round-2 review identified
+ * the popover as the "top one-line UX moment" — this constant is the seam.
+ */
+const POPOVER_MAX_PARAGRAPHS = 2;
 
 // ───────────────────────────────────────────────────────────────────────────
 // Citation regex + tokenizer
@@ -235,6 +246,25 @@ export function ChapterRenderer({ narrative, sourceParagraphs, isFirstLesson = f
    *   code example) would otherwise be incorrectly tokenized. Walking the
    *   rendered tree is safer: code blocks bypass our walker.
    */
+  /**
+   * Resolve a citation token to its source paragraphs (inclusive range). Used
+   * by the popover path to render the actual source text inline. Returns the
+   * SAME list shape the modal uses, so the modal's escape-hatch and the
+   * popover render against an identical resolution.
+   */
+  const resolveCitationParagraphs = useCallback(
+    (page: number, paragraphIdx: number, paragraphEnd?: number): SourceParagraph[] => {
+      const end = paragraphEnd ?? paragraphIdx;
+      const out: SourceParagraph[] = [];
+      for (let i = paragraphIdx; i <= end; i++) {
+        const p = sourceIndex.get(`${page}:${i}`);
+        if (p) out.push(p);
+      }
+      return out;
+    },
+    [sourceIndex],
+  );
+
   const tokenizeChildren = useCallback(
     (children: React.ReactNode): React.ReactNode => {
       const arr = React.Children.toArray(children);
@@ -246,26 +276,73 @@ export function ChapterRenderer({ narrative, sourceParagraphs, isFirstLesson = f
           }
           return (
             <React.Fragment key={`tk-${i}`}>
-              {tokens.map((tok, j) =>
-                tok.kind === 'text' ? (
-                  <React.Fragment key={`t-${i}-${j}`}>{tok.text}</React.Fragment>
-                ) : (
+              {tokens.map((tok, j) => {
+                if (tok.kind === 'text') {
+                  return (
+                    <React.Fragment key={`t-${i}-${j}`}>{tok.text}</React.Fragment>
+                  );
+                }
+                // Sprint C Phase 2: short citations (≤2 paragraphs) get the
+                // inline Radix Popover; longer ranges fall through to the
+                // full CitationModal because a popover would be too cramped.
+                // Computing the range size here lets us route deterministically
+                // at render-time without juggling state.
+                const rangeSize =
+                  typeof tok.paragraphEnd === 'number'
+                    ? tok.paragraphEnd - tok.paragraphIdx + 1
+                    : 1;
+                const button = (
                   <CitationButton
-                    key={`c-${i}-${j}-${tok.raw}`}
                     page={tok.page}
                     paragraphIdx={tok.paragraphIdx}
                     paragraphEnd={tok.paragraphEnd}
                     onClick={handleCitationClick}
                   />
-                ),
-              )}
+                );
+                if (rangeSize > POPOVER_MAX_PARAGRAPHS) {
+                  // Long-range citation — click goes straight to the modal,
+                  // same as pre-Phase-2 behavior.
+                  return (
+                    <React.Fragment key={`c-${i}-${j}-${tok.raw}`}>
+                      {button}
+                    </React.Fragment>
+                  );
+                }
+                // Short citation — wrap the button in CitationPopover. The
+                // popover's "View in source →" footer calls
+                // handleCitationClick, which opens the existing modal as the
+                // escape-hatch (deeper view of the same content).
+                const resolved = resolveCitationParagraphs(
+                  tok.page,
+                  tok.paragraphIdx,
+                  tok.paragraphEnd,
+                );
+                return (
+                  <CitationPopover
+                    key={`c-${i}-${j}-${tok.raw}`}
+                    page={tok.page}
+                    paragraphIdx={tok.paragraphIdx}
+                    paragraphEnd={tok.paragraphEnd}
+                    paragraphs={resolved}
+                    onOpenInFull={() =>
+                      handleCitationClick(
+                        tok.page,
+                        tok.paragraphIdx,
+                        tok.paragraphEnd,
+                      )
+                    }
+                  >
+                    {button}
+                  </CitationPopover>
+                );
+              })}
             </React.Fragment>
           );
         }
         return child;
       });
     },
-    [handleCitationClick],
+    [handleCitationClick, resolveCitationParagraphs],
   );
 
   const components: Components = useMemo(
