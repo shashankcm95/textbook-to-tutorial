@@ -103,6 +103,23 @@ export const tutorials = sqliteTable(
     /** Schema version of the outline classifier that ran at ingest. Cache-
      *  invalidate when the classifier algorithm changes. */
     outlineClassificationVersion: integer('outline_classification_version').notNull().default(1),
+    // ── Sprint D Phase 1: per-PDF metadata extraction (0005 migration) ──
+    // Replaces the filename-only attribution path that PR #22 stop-gapped
+    // with the "Auto-detected" warning badge. Populated at ingest from
+    // either the PDF /Info dictionary or the XMP stream; falls back to the
+    // filename heuristic when both are absent.
+    /** Book title extracted at ingest (PDF metadata > filename heuristic). */
+    bookTitle: text('book_title'),
+    /** Book author extracted at ingest. */
+    bookAuthor: text('book_author'),
+    /**
+     * Origin of the bookTitle/bookAuthor values:
+     *   'pdf-info' / 'pdf-xmp' → high-confidence (suppresses the warning badge)
+     *   'filename'             → derived from the S3 key — low-confidence
+     *   'none'                 → no source yielded a value
+     * NULL on pre-migration rows; downstream falls through to the URL heuristic.
+     */
+    metadataSource: text('metadata_source'),
   },
   (t) => ({
     byUser: index('idx_tutorials_user').on(t.userId),

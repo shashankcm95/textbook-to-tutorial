@@ -130,3 +130,73 @@ export function bookMetadataFromS3Url(s3Url: string): BookMetadata {
     highConfidence: false,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Sprint D Phase 1 — DB-first resolver
+// ---------------------------------------------------------------------------
+//
+// Replaces the direct `bookMetadataFromS3Url(sourceS3Url)` call at the page
+// layer. Prefers the values persisted at ingest by extract-pdf-metadata.ts
+// (high-confidence when sourced from PDF /Info or XMP); falls back to the
+// filename heuristic only for tutorials predating this column (NULL source)
+// or ingests where extraction yielded nothing.
+//
+// Confidence rules (drives the UI's "Auto-detected" warning badge):
+//   - 'pdf-info' / 'pdf-xmp' → highConfidence = true  (badge hidden)
+//   - 'filename'             → highConfidence = false (badge shown)
+//   - 'none'                 → empty strings, highConfidence = false
+//   - NULL source (pre-migration row) → fall through to URL heuristic;
+//     resulting confidence depends on that heuristic's own signal.
+
+/**
+ * Subset of the `tutorials` row needed to resolve book metadata. We accept
+ * the minimal shape rather than the full Drizzle row type so this helper
+ * can be unit-tested without DB fixtures.
+ */
+export interface TutorialMetadataSource {
+  bookTitle: string | null;
+  bookAuthor: string | null;
+  metadataSource: string | null;
+  sourceS3Url: string;
+}
+
+export function resolveBookMetadata(tutorial: TutorialMetadataSource): BookMetadata {
+  // ── 1. DB has PDF-extracted metadata → high-confidence ───────────────
+  if (
+    tutorial.metadataSource === 'pdf-info' ||
+    tutorial.metadataSource === 'pdf-xmp'
+  ) {
+    return {
+      bookTitle: tutorial.bookTitle ?? '',
+      author: tutorial.bookAuthor ?? '',
+      highConfidence: true,
+    };
+  }
+
+  // ── 2. DB has filename-derived metadata → keep the badge on ──────────
+  // We trust whatever the worker wrote; the worker already ran the same
+  // heuristic against the URL and produced these values. Skipping the
+  // re-run keeps the source-of-truth in the DB and avoids string-drift
+  // if the heuristic algorithm changes in a later release.
+  if (tutorial.metadataSource === 'filename') {
+    return {
+      bookTitle: tutorial.bookTitle ?? '',
+      author: tutorial.bookAuthor ?? '',
+      highConfidence: false,
+    };
+  }
+
+  // ── 3. DB explicitly says 'none' → no values derivable ───────────────
+  // The UI renders empty title / empty author and falls back to its default
+  // "Untitled tutorial" placeholder. Badge stays on (low-confidence default).
+  if (tutorial.metadataSource === 'none') {
+    return { bookTitle: '', author: '', highConfidence: false };
+  }
+
+  // ── 4. Pre-migration row (NULL metadataSource) → URL heuristic ───────
+  // Backwards-compat path: ingests that ran before the 0005 migration
+  // never populated these columns. Use the legacy filename heuristic so
+  // the user-visible behavior is unchanged until the tutorial is re-
+  // ingested. (Backfill is documented in the PR description as optional.)
+  return bookMetadataFromS3Url(tutorial.sourceS3Url);
+}

@@ -59,7 +59,7 @@ import {
 import { StreamingClient } from './StreamingClient';
 import type { ReviewableCard } from '@/components/FlashcardReviewer';
 import type { QuizQuestion, LLMFlashcard } from '@/lib/types';
-import { bookMetadataFromS3Url } from '@/lib/book-metadata';
+import { resolveBookMetadata } from '@/lib/book-metadata';
 
 // Force dynamic rendering — this page is per-user; static caching would be
 // catastrophic (one user could see another's tutorial). Setting at the file
@@ -111,6 +111,16 @@ export default async function TutorialPage({ params }: TutorialPageProps) {
       errorMessage: schema.tutorials.errorMessage,
       // ── lazy-hybrid-chunking gating ratchet (Commit 1 / 3) ──
       maxUnlockedChapterIdx: schema.tutorials.maxUnlockedChapterIdx,
+      // ── Sprint D Phase 1: per-PDF metadata for resolveBookMetadata() ──
+      // sourceS3Url is also required as the pre-migration fallback path
+      // (NULL metadataSource → re-run the filename heuristic on the URL).
+      // The previous code referenced tutorial.sourceS3Url despite NOT
+      // selecting it, silently passing undefined to bookMetadataFromS3Url
+      // — fixed by adding it to the projection here.
+      sourceS3Url: schema.tutorials.sourceS3Url,
+      bookTitle: schema.tutorials.bookTitle,
+      bookAuthor: schema.tutorials.bookAuthor,
+      metadataSource: schema.tutorials.metadataSource,
     })
     .from(schema.tutorials)
     .where(
@@ -264,7 +274,7 @@ export default async function TutorialPage({ params }: TutorialPageProps) {
       initialReviewCards={initialReviewCards}
       initialQuestionsByChapter={initialQuestionsByChapter}
       initialFlashcardsByChapter={initialFlashcardsByChapter}
-      bookMetadata={bookMetadataFromS3Url(tutorial.sourceS3Url)}
+      bookMetadata={resolveBookMetadata(tutorial)}
       csrfToken={csrfToken}
       maxUnlockedChapterIdx={tutorial.maxUnlockedChapterIdx}
     />
