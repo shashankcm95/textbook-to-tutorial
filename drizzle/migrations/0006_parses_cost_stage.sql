@@ -1,0 +1,31 @@
+-- 0006_parses_cost_stage.sql — Sprint H Wave 3 (Rev D HIGH-2): stage discriminator.
+--
+-- Before this migration, three LLM calls per chapter all wrote into the same
+-- `parses_cost` table with no way to distinguish them at query time:
+--   - narrative call    (gpt-4o)
+--   - quiz call         (gpt-4o-mini)
+--   - extract-diagrams  (gpt-4o-mini)
+--
+-- The quiz row and extract row both use model='gpt-4o-mini' and land in the
+-- same db.transaction(...) with the same CURRENT_TIMESTAMP second. Operators
+-- investigating cost-cap overruns couldn't tell which call dominated; the
+-- eval-harness (Sprint E+F) couldn't break down spend per stage.
+--
+-- This adds a `stage` TEXT column with the discriminator values:
+--   'narrative'         → main streaming narrative call (gpt-4o)
+--   'quiz'              → quiz + flashcards (gpt-4o-mini)
+--   'extract-diagrams'  → structured diagram extractor (gpt-4o-mini)
+--   'fidelity'          → fidelity scorer (gpt-4o-mini)
+--   'parse'             → parser-level rows (chapter_id IS NULL); pre-Sprint-H
+--                          rows have NULL for backward compatibility
+--
+-- Nullable for backward compatibility with pre-migration rows. New inserts
+-- in per-chapter.ts MUST supply a value (enforced by application code, not
+-- the schema, so legacy rows survive the migration cleanly).
+--
+-- Schema-additive (per project migration discipline). SQLite ALTER TABLE ADD
+-- COLUMN is a metadata-only op on SQLite ≥3.35; cost is constant regardless
+-- of row count.
+
+ALTER TABLE `parses_cost`
+  ADD COLUMN `stage` text;

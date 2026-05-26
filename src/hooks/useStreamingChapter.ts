@@ -44,6 +44,10 @@
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
+import {
+  DIAGRAMS_EXTRACTED_EVENT,
+  NARRATIVE_STREAM_COMPLETE_EVENT,
+} from '@/lib/generation/diagrams-extracted-event';
 
 // ───────────────────────────────────────────────────────────────────────────
 // Public types
@@ -112,6 +116,30 @@ export interface UseStreamingChapterResult {
   cancel: () => void;
   /** Number of reconnect attempts consumed since the last successful frame. */
   reconnectCount: number;
+  /**
+   * Sprint H Wave 1 — true between `narrative-stream-complete` and
+   * `diagrams-extracted`. Consumers (e.g., ChapterRenderer) can light a
+   * subtle "Generating diagrams…" indicator while the second-pass
+   * extraction call runs server-side (Builder D's per-chapter wiring).
+   *
+   * Pre-Builder-D, `diagrams-extracted` never arrives (the bulkhead fail-
+   * open path skips the callback), so this flag stays `true` through
+   * `chapter-complete`. The hook clears it on terminal frames (`done`,
+   * `error`, `chapter-complete`) so it never sticks across stream resets.
+   */
+  isExtracting: boolean;
+  /**
+   * Sprint H Wave 1 — count of validated F.1 diagram payloads from the
+   * most recent `diagrams-extracted` frame. `null` before the frame
+   * arrives. Consumers can show "🪄 3 diagrams added" or similar.
+   */
+  extractedDiagramCount: number | null;
+  /**
+   * Sprint H Wave 1 — wire entries that failed fromWire / Zod parse
+   * during extraction. `null` before the frame arrives. Useful for
+   * debug surfaces; not a user-facing number.
+   */
+  extractedDroppedCount: number | null;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -138,6 +166,11 @@ export function useStreamingChapter(
   const [status, setStatus] = useState<StreamStatus>('idle');
   const [error, setError] = useState<Error | null>(null);
   const [reconnectCount, setReconnectCount] = useState(0);
+  // Sprint H Wave 1 — extraction-indicator state. See UseStreamingChapterResult
+  // JSDoc for the lifecycle contract.
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [extractedDiagramCount, setExtractedDiagramCount] = useState<number | null>(null);
+  const [extractedDroppedCount, setExtractedDroppedCount] = useState<number | null>(null);
 
   // Refs that survive re-renders (closures over the latest values).
   const esRef = useRef<EventSource | null>(null);
@@ -185,6 +218,13 @@ export function useStreamingChapter(
     setStatus('done');
     setError(null);
     setReconnectCount(0);
+    // Sprint H Wave 3 fix (Rev E HIGH-1): clear the extracting indicator on
+    // cancel. Without this, a user who hits "Stop" mid-extraction (after
+    // narrative-stream-complete fired but before diagrams-extracted arrives)
+    // gets a permanently-stuck "Generating diagrams…" spinner until they
+    // navigate to a different chapter. Count fields are preserved (caller may
+    // want to read the last successful run; mirror the `done` event branch).
+    setIsExtracting(false);
   }, [teardown]);
 
   useEffect(() => {
@@ -195,6 +235,14 @@ export function useStreamingChapter(
       setStatus('idle');
       return;
     }
+
+    // Sprint H Wave 1 — reset extraction-indicator state when (re)opening
+    // a stream. Otherwise a chapterIdx change carries the previous
+    // chapter's count fields into the new chapter's UX until the new
+    // diagrams-extracted frame arrives.
+    setIsExtracting(false);
+    setExtractedDiagramCount(null);
+    setExtractedDroppedCount(null);
 
     let attempt = 0;
     let disposed = false;
@@ -238,13 +286,19 @@ export function useStreamingChapter(
         deliverFrame('message', ev.data);
       };
 
-      // Named events — the protocol per spawn brief:
-      //   chapter-start | token | chapter-complete | cost-update | done | error
+      // Named events — the protocol per spawn brief + Sprint H Wave 1 additions:
+      //   chapter-start | token | narrative-stream-complete | diagrams-extracted
+      //   | chapter-complete | cost-update | done | error
       // Implementation: attach listeners for each. Generic registry to avoid
-      // duplication.
+      // duplication. The two Sprint H frames (narrative-stream-complete +
+      // diagrams-extracted) drive isExtracting / extractedDiagramCount /
+      // extractedDroppedCount state alongside the normal deliverFrame call so
+      // existing consumers still see them as opaque frames via onFrame.
       const NAMED_EVENTS = [
         'chapter-start',
         'token',
+        NARRATIVE_STREAM_COMPLETE_EVENT,
+        DIAGRAMS_EXTRACTED_EVENT,
         'chapter-complete',
         'cost-update',
         'done',
@@ -261,6 +315,12 @@ export function useStreamingChapter(
           if (eventName === 'done') {
             deliverFrame('done', me.data);
             setStatus('done');
+            // Sprint H Wave 1 — terminal frame; clear the extraction
+            // indicator so a stuck "Generating diagrams…" pill can't
+            // outlive the stream. The count fields are NOT cleared so a
+            // post-stream consumer can still read "extracted N" from the
+            // last successful run.
+            setIsExtracting(false);
             // Successful completion — close gracefully (no abort needed; the
             // server has already finished). But still close the EventSource
             // so the browser doesn't keep the HTTP/1.1 connection in
@@ -273,6 +333,9 @@ export function useStreamingChapter(
           }
           if (eventName === 'error') {
             deliverFrame('error', me.data);
+            // Sprint H Wave 1 — terminal frame; clear the extraction
+            // indicator (same rationale as the done branch).
+            setIsExtracting(false);
             // Protocol error: server intentionally signaled error (e.g.,
             // cost-cap-exceeded). Do NOT auto-reconnect — the server told
             // us why it stopped. Let the UI surface it.
@@ -285,11 +348,55 @@ export function useStreamingChapter(
             setError(extractProtocolError(parsedData));
             return;
           }
+          // Sprint H Wave 1 — narrative-stream-complete: flip isExtracting
+          // ON to drive the "Generating diagrams…" UI indicator. The
+          // server emits this the moment narrative-token streaming ends
+          // (before the 4o-mini extraction call runs).
+          if (eventName === NARRATIVE_STREAM_COMPLETE_EVENT) {
+            setIsExtracting(true);
+          }
+          // Sprint H Wave 1 — diagrams-extracted: flip isExtracting OFF
+          // and surface the per-chapter count + drop count. The payload
+          // shape is DiagramsExtractedEvent (count, droppedCount, costUsd).
+          // Parse defensively — server is trusted, but a malformed frame
+          // shouldn't corrupt hook state.
+          if (eventName === DIAGRAMS_EXTRACTED_EVENT) {
+            setIsExtracting(false);
+            const parsed = safeParse(me.data);
+            if (parsed !== null && typeof parsed === 'object') {
+              const obj = parsed as { count?: unknown; droppedCount?: unknown };
+              if (typeof obj.count === 'number' && Number.isFinite(obj.count)) {
+                setExtractedDiagramCount(obj.count);
+              }
+              if (
+                typeof obj.droppedCount === 'number' &&
+                Number.isFinite(obj.droppedCount)
+              ) {
+                setExtractedDroppedCount(obj.droppedCount);
+              }
+            }
+          }
+          // Sprint H Wave 1 — chapter-complete is the bulkhead-safe place
+          // to clear isExtracting in case diagrams-extracted never arrived
+          // (extract failed and per-chapter fail-opened). The count fields
+          // stay null in that case, which consumers can read as "no
+          // structured diagrams this run".
+          if (eventName === 'chapter-complete') {
+            setIsExtracting(false);
+          }
           // All other events — just deliver to the caller. Status flips to
           // 'streaming' on first successful frame.
-          if (status !== 'streaming') {
-            setStatus('streaming');
-          }
+          //
+          // Sprint H Wave 3 fix (Rev E HIGH-2): use the functional updater
+          // form so we read the CURRENT status, not the stale captured-at-
+          // effect-open value. The outer effect intentionally omits `status`
+          // from its dependency array to avoid re-opening the stream on every
+          // status transition; that means the `status` symbol read here is
+          // the value from the render that created the effect, which is
+          // typically 'idle' or 'connecting' and never re-reads. Functional
+          // updater is the standard React idiom for read-and-set in a
+          // closure that cannot list the state in its dep array.
+          setStatus((prev) => (prev !== 'streaming' ? 'streaming' : prev));
           // Reset reconnect counter on any successful frame — we made
           // progress, so subsequent failures get a fresh budget.
           attempt = 0;
@@ -392,5 +499,13 @@ export function useStreamingChapter(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tutorialId, chapterIdx, paused, teardown]);
 
-  return { status, error, cancel, reconnectCount };
+  return {
+    status,
+    error,
+    cancel,
+    reconnectCount,
+    isExtracting,
+    extractedDiagramCount,
+    extractedDroppedCount,
+  };
 }

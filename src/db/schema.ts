@@ -328,6 +328,11 @@ export const parsesCost = sqliteTable(
     completionTokens: integer('completion_tokens').notNull(),
     costUsd: real('cost_usd').notNull(),                               // computed at insert time
     validationDropCount: integer('validation_drop_count').notNull().default(0),
+    // Sprint H Wave 3 (Rev D HIGH-2): stage discriminator so quiz + extract
+    // rows are distinguishable at query time (both use gpt-4o-mini). Values:
+    // 'narrative' | 'quiz' | 'extract-diagrams' | 'fidelity' | 'parse'.
+    // Nullable for backward compat with pre-migration 0006 rows.
+    stage: text('stage'),
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
       .default(sql`CURRENT_TIMESTAMP`),

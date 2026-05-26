@@ -41,6 +41,12 @@ import {
 import { generateNarrativeOnly } from '@/lib/openai/narrative-only';
 import { generateQuizFromNarrative } from '@/lib/openai/quiz-from-narrative';
 import { scoreFidelity } from '@/lib/openai/fidelity-check';
+import { extractDiagrams } from '@/lib/openai/extract-diagrams';
+import { weaveDiagrams } from '@/lib/diagrams/weave';
+import { estimateCost } from '@/lib/openai/cost';
+import { assertCostBudget } from '@/lib/openai/cost-cap';
+import { EXTRACT_SYSTEM_PROMPT } from '@/lib/prompts/extract-diagrams';
+import type { OnDiagramsExtracted } from './diagrams-extracted-event';
 import {
   readChunk,
   resolveChunksBucket,
@@ -54,6 +60,15 @@ import { validateAnchors, type AnchorWhitelistEntry } from '@/lib/openai/anchor-
 import type { VoiceProfile } from '@/lib/ingest/voice-extract';
 import type { SourceParagraph } from '@/lib/types';
 
+// Sprint H Wave 1 (Builder D): the extract-diagrams call uses gpt-4o-mini
+// with `max_tokens: 2048` (mirrored from extract-diagrams.ts). Keeping the
+// cap constants here makes the pre-call cost projection visible at the
+// integration boundary — per-chapter is the cost-budget authority for the
+// lazy-hybrid pipeline (the extractor module deliberately stays out of it
+// to preserve the bulkhead between compute and budget).
+const EXTRACT_MODEL = 'gpt-4o-mini';
+const EXTRACT_MAX_COMPLETION_TOKENS = 2048;
+
 export interface GenerateChapterArgs {
   tutorialId: string;
   chapterIdx: number;
@@ -64,6 +79,14 @@ export interface GenerateChapterArgs {
   onNarrativeComplete?: (narrative: string) => void;
   /** Emit when the whole chapter (narrative + quiz + flashcards) is done. */
   onChapterComplete?: () => void;
+  /**
+   * Sprint H Wave 1 (Builder D) — emit after the 4o-mini diagram extractor
+   * finishes successfully. Synchronous + fire-and-forget; the SSE route
+   * uses it to send a `diagrams-extracted` frame. NOT invoked on the
+   * fail-open path (extractor error / cost-cap rejection). See
+   * `./diagrams-extracted-event.ts` for the contract.
+   */
+  onDiagramsExtracted?: OnDiagramsExtracted;
 }
 
 export interface GenerateChapterResult {
@@ -86,7 +109,15 @@ export class ChapterGenerationError extends Error {
 export async function generateChapter(
   args: GenerateChapterArgs,
 ): Promise<GenerateChapterResult> {
-  const { tutorialId, chapterIdx, abortSignal, onNarrativeToken, onNarrativeComplete, onChapterComplete } = args;
+  const {
+    tutorialId,
+    chapterIdx,
+    abortSignal,
+    onNarrativeToken,
+    onNarrativeComplete,
+    onChapterComplete,
+    onDiagramsExtracted,
+  } = args;
 
   // ── 1. Load chapter row + tutorial (for chunk-bucket resolution) ───────
   const chRows = await db
@@ -166,6 +197,88 @@ export async function generateChapter(
   }
   onNarrativeComplete?.(narrativeResult.narrative);
 
+  // ── 4.25. Extract structured diagrams from the prose (Sprint H Wave 1) ─
+  //
+  // Shape A "2-pass" extraction: a dedicated gpt-4o-mini call reads the
+  // completed narrative and emits validated DiagramPayload[] which we
+  // weave into the narrative as ```diagram fences. Background: PR #36's
+  // prompt-teeth-alone approach showed 0/5 emission across diverse DDIA
+  // chapters; Sprint H adds this extractor + the pure weaveDiagrams
+  // splice path. See `_inspect/sprint-h/response-format-rfc.md`.
+  //
+  // Fail-open semantics (LOAD-BEARING): extractor failure (network,
+  // refusal, cost-cap rejection, parse error) MUST NOT block chapter
+  // completion. The narrative without diagrams is still a valid result.
+  // See `kb:architecture/discipline/stability-patterns` §Bulkhead.
+  //
+  // Cost-cap gating lives HERE (not in extract-diagrams.ts) per the
+  // bulkhead Builder A documented: extract-diagrams owns compute,
+  // per-chapter owns the per-tutorial budget envelope.
+  //
+  // The extractor's structured emission cannot introduce new
+  // `[ref:pageN:paragraphM]` citations (it only emits fenced JSON), so the
+  // anchor validator's behavior is unchanged whether it reads the original
+  // or the woven narrative. We persist the WOVEN narrative so downstream
+  // readers (renderer, density metric, eval-harness) see the diagrams.
+  let wovenNarrative = narrativeResult.narrative;
+  let extractCostUsd = 0;
+  let extractParseCostRow: {
+    model: string;
+    promptTokens: number;
+    completionTokens: number;
+    costUsd: number;
+  } | null = null;
+  try {
+    // Pre-call cost-cap gate — mirrors streaming.ts's pattern. Use the
+    // EXTRACT_SYSTEM_PROMPT + the narrative as the prompt-text envelope.
+    const extractEstimate = estimateCost({
+      model: EXTRACT_MODEL,
+      promptText: EXTRACT_SYSTEM_PROMPT + narrativeResult.narrative,
+      maxCompletionTokens: EXTRACT_MAX_COMPLETION_TOKENS,
+    });
+    await assertCostBudget(tutorialId, extractEstimate.estimatedCostUsd);
+
+    const extractResult = await extractDiagrams({
+      narrative: narrativeResult.narrative,
+      abortSignal,
+    });
+    extractCostUsd = extractResult.costUsd;
+    extractParseCostRow = {
+      model: extractResult.model,
+      promptTokens: extractResult.promptTokens,
+      completionTokens: extractResult.completionTokens,
+      costUsd: extractResult.costUsd,
+    };
+
+    if (extractResult.diagrams.length > 0) {
+      // No anchor hints today — extract-diagrams emits payloads only; the
+      // weaver falls through to its 30%-position deterministic fallback
+      // (strategy 3). Future enhancement: surface heading/citation anchor
+      // hints from the extractor; weave already accepts them.
+      wovenNarrative = weaveDiagrams(
+        narrativeResult.narrative,
+        extractResult.diagrams.map((payload) => ({ payload })),
+      );
+    }
+
+    // SSE callback (synchronous; fire-and-forget; see contract module).
+    onDiagramsExtracted?.({
+      count: extractResult.diagrams.length,
+      droppedCount: extractResult.droppedCount,
+      costUsd: extractResult.costUsd,
+    });
+  } catch (err) {
+    // Fail-open: log + continue with the unmodified narrative. The
+    // bulkhead means extractor failure (CostCapExceeded, parse error,
+    // network, refusal) cannot fail the chapter. The SSE route sees the
+    // absence of a `diagrams-extracted` frame and the streaming hook
+    // treats it as "extraction skipped" (cosmetic; UX still correct).
+    // eslint-disable-next-line no-console
+    console.error(
+      `[per-chapter] diagram extraction failed for ${chapter.id}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   // ── 4.5. Validate whitelist-anchor coverage (Feature B' Wave 3) ──────
   //
   // Wave-3 review HIGH 3B-H1 fix: moved from Step 6.5 to Step 4.5 — runs
@@ -189,8 +302,12 @@ export async function generateChapter(
   // takes priority over audit-row persistence.
   if (anchorWhitelist && anchorWhitelist.length > 0) {
     try {
+      // Sprint H Wave 1: validate against the WOVEN narrative. ```diagram
+      // fences don't carry [ref:pageN:paragraphM] citations, so behavior
+      // is unchanged whether we pass the original or woven string — but
+      // the variable name reflects the post-extract pipeline state.
       const validation = validateAnchors({
-        narrative: narrativeResult.narrative,
+        narrative: wovenNarrative,
         sourceParagraphs,
         whitelist: anchorWhitelist,
       });
@@ -235,11 +352,17 @@ export async function generateChapter(
   } catch (err) {
     // Narrative succeeded but quiz failed. Persist narrative-only as 'partial'
     // so the user can still read; mark quiz failure in error_message.
+    //
+    // Sprint H Wave 3 fix (Rev D HIGH-1): pass the WOVEN narrative so any
+    // diagrams the extractor already produced survive the partial-state path.
+    // Also pass the extract cost row so the spend is accounted for even when
+    // quiz failed (extract billed regardless).
     await persistNarrativeOnly(
       chapter.id,
       tutorialId,
-      narrativeResult,
+      { ...narrativeResult, narrative: wovenNarrative },
       sourceParagraphs,
+      extractParseCostRow,
     );
     throw err;
   }
@@ -249,7 +372,12 @@ export async function generateChapter(
   db.transaction((tx) => {
     tx.update(chapters)
       .set({
-        narrative: narrativeResult.narrative,
+        // Sprint H Wave 1: persist the WOVEN narrative so the renderer +
+        // density metric + eval-harness see structured ```diagram fences.
+        // When extraction returned 0 diagrams OR fail-opened, this is
+        // identical to narrativeResult.narrative (weave is idempotent with
+        // an empty diagrams array).
+        narrative: wovenNarrative,
         status: finalStatus,
         sourceParagraphsJson: JSON.stringify(sourceParagraphs),
       })
@@ -282,7 +410,10 @@ export async function generateChapter(
         })
         .run();
     }
-    // parses_cost rows — one per LLM call
+    // parses_cost rows — one per LLM call.
+    // Sprint H Wave 3 (Rev D HIGH-2): `stage` discriminator added via
+    // migration 0006. Quiz + extract both use gpt-4o-mini; before the
+    // column rows were indistinguishable at query time.
     tx.insert(parsesCost)
       .values({
         id: crypto.randomUUID(),
@@ -293,6 +424,7 @@ export async function generateChapter(
         completionTokens: narrativeResult.completionTokens,
         costUsd: narrativeResult.costUsd,
         validationDropCount: 0,
+        stage: 'narrative',
       })
       .run();
     tx.insert(parsesCost)
@@ -305,8 +437,27 @@ export async function generateChapter(
         completionTokens: quizResult.completionTokens,
         costUsd: quizResult.costUsd,
         validationDropCount: quizResult.validationDropCount,
+        stage: 'quiz',
       })
       .run();
+    // Sprint H Wave 1 (Builder D): third parses_cost row for the
+    // diagram-extraction call. Only inserted when extract succeeded
+    // (fail-open path skips it — there's nothing to account for).
+    if (extractParseCostRow) {
+      tx.insert(parsesCost)
+        .values({
+          id: crypto.randomUUID(),
+          tutorialId,
+          chapterId: chapter.id,
+          model: extractParseCostRow.model,
+          promptTokens: extractParseCostRow.promptTokens,
+          completionTokens: extractParseCostRow.completionTokens,
+          costUsd: extractParseCostRow.costUsd,
+          validationDropCount: 0,
+          stage: 'extract-diagrams',
+        })
+        .run();
+    }
   });
 
   // ── 7. Score narrative-vs-source fidelity (DRIFT-test3-022) ──────────
@@ -365,11 +516,15 @@ export async function generateChapter(
   onChapterComplete?.();
   return {
     chapterId: chapter.id,
-    narrative: narrativeResult.narrative,
+    // Sprint H Wave 1: return the woven narrative so callers reading the
+    // result in-memory see what's persisted (and what the renderer will
+    // see). On the fail-open path this equals narrativeResult.narrative.
+    narrative: wovenNarrative,
     questionsCount: quizResult.questions.length,
     flashcardsCount: quizResult.flashcards.length,
     validationDropCount: quizResult.validationDropCount,
-    totalCostUsd: narrativeResult.costUsd + quizResult.costUsd + fidelityCostUsd,
+    totalCostUsd:
+      narrativeResult.costUsd + quizResult.costUsd + fidelityCostUsd + extractCostUsd,
     status: finalStatus,
   };
 }
@@ -483,10 +638,20 @@ async function persistNarrativeOnly(
     costUsd: number;
   },
   sourceParagraphs: SourceParagraph[],
+  extractParseCostRow: {
+    model: string;
+    promptTokens: number;
+    completionTokens: number;
+    costUsd: number;
+  } | null = null,
 ): Promise<void> {
   db.transaction((tx) => {
     tx.update(chapters)
       .set({
+        // Sprint H Wave 3 fix (Rev D HIGH-1): caller passes wovenNarrative
+        // (with ```diagram fences) when extraction succeeded so partial-state
+        // chapters preserve the structured content. When extraction failed or
+        // returned 0 diagrams, this equals narrativeResult.narrative.
         narrative: narrativeResult.narrative,
         status: 'partial',
         sourceParagraphsJson: JSON.stringify(sourceParagraphs),
@@ -503,7 +668,26 @@ async function persistNarrativeOnly(
         completionTokens: narrativeResult.completionTokens,
         costUsd: narrativeResult.costUsd,
         validationDropCount: 0,
+        stage: 'narrative',
       })
       .run();
+    // Sprint H Wave 3 (Rev D HIGH-1): record extract cost on the partial-
+    // state path too. Extract already billed before quiz failed; dropping
+    // the row would underreport spend.
+    if (extractParseCostRow) {
+      tx.insert(parsesCost)
+        .values({
+          id: crypto.randomUUID(),
+          tutorialId,
+          chapterId,
+          model: extractParseCostRow.model,
+          promptTokens: extractParseCostRow.promptTokens,
+          completionTokens: extractParseCostRow.completionTokens,
+          costUsd: extractParseCostRow.costUsd,
+          validationDropCount: 0,
+          stage: 'extract-diagrams',
+        })
+        .run();
+    }
   });
 }

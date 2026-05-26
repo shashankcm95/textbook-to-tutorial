@@ -11,12 +11,26 @@
 // endpoint per-chapter with prefetch.
 //
 // SSE protocol (events emitted):
-//   - chapter-start:    { chapterId, ordinal, title, sourceParagraphs[] }
-//   - token:            { chapterId, kind: 'narrative', delta }
-//   - chapter-complete: { chapterId, questions, flashcards, validationDropCount }
-//   - cost-update:      { costUsd }
-//   - done:             {}
-//   - error:            { code, message? }
+//   - chapter-start:             { chapterId, ordinal, title, sourceParagraphs[] }
+//   - token:                     { chapterId, kind: 'narrative', delta }
+//   - narrative-stream-complete: { chapterId }                — Sprint H Wave 1 (Builder E)
+//   - diagrams-extracted:        { count, droppedCount, costUsd } — Sprint H Wave 1
+//   - chapter-complete:          { chapterId, questions, flashcards, validationDropCount }
+//   - cost-update:               { costUsd }
+//   - done:                      {}
+//   - error:                     { code, message? }
+//
+// Sprint H Wave 1 frames (additive — older consumers safely ignore them):
+//   * narrative-stream-complete: fires the moment narrative-token streaming
+//     finishes, BEFORE the per-chapter pipeline starts the 4o-mini diagram
+//     extraction call (Builder D's wiring). The streaming hook flips
+//     `isExtracting` true on this frame and false on `diagrams-extracted`.
+//   * diagrams-extracted: fires AFTER successful extraction + weave. Payload
+//     shape is `DiagramsExtractedEvent` from
+//     `@/lib/generation/diagrams-extracted-event`. On extract failure, the
+//     bulkhead in per-chapter.ts fail-opens and this frame is NOT emitted —
+//     `isExtracting` then stays true through `chapter-complete`, which the
+//     hook treats as "extraction skipped" (cosmetic; UX still correct).
 //
 // Auth: session cookie (mirrors GET /api/tutorials/:id pattern).
 // CSRF: none required — GET endpoint, no state change at the protocol layer.
@@ -29,9 +43,20 @@ import { db } from '@/db/client';
 import { tutorials, chapters } from '@/db/schema';
 import { verifySession, SESSION_COOKIE_NAME } from '@/lib/session';
 import { generateChapter, ChapterGenerationError } from '@/lib/generation/per-chapter';
+import type { GenerateChapterArgs } from '@/lib/generation/per-chapter';
 import { resolveChunksBucket, readChunk } from '@/lib/s3-chunks';
 import { tryAcquireSlot, releaseSlot } from '@/lib/streaming-slots';
 import type { SourceParagraph } from '@/lib/types';
+import {
+  DIAGRAMS_EXTRACTED_EVENT,
+  NARRATIVE_STREAM_COMPLETE_EVENT,
+  type DiagramsExtractedEvent,
+} from '@/lib/generation/diagrams-extracted-event';
+
+// Sprint H Wave 1 (Builder D): `GenerateChapterArgs` natively declares
+// `onDiagramsExtracted` after Builder D landed — the temporary
+// `GenerateChapterArgsWithDiagrams` intersection alias that lived here has
+// been removed. The route now uses GenerateChapterArgs directly.
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -150,16 +175,33 @@ export async function GET(
       });
 
       try {
-        const result = await generateChapter({
+        // Sprint H Wave 1 (Builder D landed): `onDiagramsExtracted` is now
+        // a first-class field on `GenerateChapterArgs`. The per-chapter
+        // pipeline invokes the callback after a successful extract; on the
+        // fail-open path (extract error / cost-cap rejection) the callback
+        // is NOT invoked — the streaming hook then leaves `isExtracting`
+        // true through `chapter-complete` (cosmetic; UX still correct).
+        const generateArgs: GenerateChapterArgs = {
           tutorialId,
           chapterIdx,
           abortSignal: abort.signal,
           onNarrativeToken: (delta) =>
             emit('token', { chapterId: chapter.id, kind: 'narrative', delta }),
           onNarrativeComplete: (_narrative) => {
-            // No-op for now; could emit a "phase-shift" event later.
+            // Sprint H Wave 1: signal narrative-streaming done to the
+            // client so its "Generating diagrams…" indicator can flip on
+            // ahead of the extraction call Builder D will wire next.
+            emit(NARRATIVE_STREAM_COMPLETE_EVENT, { chapterId: chapter.id });
           },
-        });
+          onDiagramsExtracted: (event: DiagramsExtractedEvent) => {
+            // Builder D's per-chapter wiring calls this AFTER successful
+            // extraction (fail-open path skips the callback). Frame is
+            // additive; the payload shape is the contract module's
+            // DiagramsExtractedEvent.
+            emit(DIAGRAMS_EXTRACTED_EVENT, event);
+          },
+        };
+        const result = await generateChapter(generateArgs);
 
         // chapter-complete with structured Q + F payload — client uses this
         // to populate quiz + flashcard surfaces.

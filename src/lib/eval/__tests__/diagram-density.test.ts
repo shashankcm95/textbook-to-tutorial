@@ -7,6 +7,8 @@
 import { describe, it, expect } from 'vitest';
 
 import { computeDiagramDensity } from '../diagram-density';
+import { weaveDiagrams, type ExtractedDiagram } from '@/lib/diagrams/weave';
+import type { DiagramPayload } from '@/lib/diagrams/schema';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixture builders
@@ -146,6 +148,118 @@ describe('computeDiagramDensity', () => {
     expect(d.totalValid).toBe(1);
     expect(d.parseFailures).toBe(0);
     expect(d.mermaidBlocks).toBe(0);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Sprint H Wave 1 (Builder E) — source-blindness regression.
+  //
+  // Why this test exists:
+  // ---------------------
+  // Sprint H's Shape A architecture means ```diagram fences land in the
+  // persisted narrative via TWO paths:
+  //   (1) The 4o narrative model emits them inline mid-stream (current
+  //       Sprint F.2 path — the empirical 0/5 baseline this sprint is
+  //       lifting).
+  //   (2) The 4o-mini extractor emits them post-stream, and weaveDiagrams
+  //       splices them into the narrative before persistence (Builder C
+  //       wired this; Builder D will call it from per-chapter.ts).
+  //
+  // The density metric MUST be source-blind: a Shape-A woven fence and a
+  // Sprint-F.2 inline fence with the SAME payload MUST count identically.
+  // If they don't, Wave 4's empirical-success gate (≥3/5 emission, ≥2
+  // kinds) becomes meaningless — we'd be measuring path-of-emission, not
+  // emission rate.
+  //
+  // The test exercises the actual `weaveDiagrams` function (no mock) so
+  // any future change to weave's fence-emission shape that drifts away
+  // from the BLOCK_RE regex contract is caught here, not in production.
+  // ───────────────────────────────────────────────────────────────────────
+  it('source-blindness: woven fences produce identical byKind counts vs inline fences', () => {
+    // (a) Narrative with fences emitted INLINE (the F.2 path the LLM
+    //     currently uses on the rare occasion it reaches for one). These
+    //     fences are hand-written into the narrative string — no weave
+    //     involvement.
+    const narrativeInline = [
+      '## Lesson 1: Replication',
+      '',
+      'In a replicated system, writes propagate from a leader to followers.',
+      '',
+      diagramBlock(VALID_COMPARISON_TABLE),
+      '',
+      'The two main approaches differ in failure modes.',
+      '',
+      diagramBlock(VALID_DIAGRAM_FLOW),
+      '',
+      'Each has its place.',
+    ].join('\n');
+
+    // (b) Narrative where the SAME payloads arrive via weaveDiagrams —
+    //     prose-only narrative + ExtractedDiagram inputs. The weave runs
+    //     for real (no mock) so we're testing the actual production path
+    //     Builder D will exercise.
+    const narrativeProseOnly = [
+      '## Lesson 1: Replication',
+      '',
+      'In a replicated system, writes propagate from a leader to followers.',
+      '',
+      'The two main approaches differ in failure modes.',
+      '',
+      'Each has its place.',
+    ].join('\n');
+
+    const diagrams: ExtractedDiagram[] = [
+      {
+        // The fixture payloads above are JSON strings; round-trip through
+        // JSON.parse to get the structured shape weave expects. The cast
+        // is safe: each fixture is built to satisfy DiagramPayloadSchema.
+        payload: JSON.parse(VALID_COMPARISON_TABLE) as DiagramPayload,
+        anchorHeading: 'Replication',
+      },
+      {
+        payload: JSON.parse(VALID_DIAGRAM_FLOW) as DiagramPayload,
+      },
+    ];
+    const narrativeWoven = weaveDiagrams(narrativeProseOnly, diagrams);
+
+    const dInline = computeDiagramDensity(narrativeInline);
+    const dWoven = computeDiagramDensity(narrativeWoven);
+
+    // The contract: byKind counts MUST be identical regardless of how
+    // the fences arrived. totalValid follows; parseFailures + mermaidBlocks
+    // must both be zero on both sides (sanity — the woven fences round-trip
+    // through parseDiagramBlock cleanly).
+    expect(dWoven.byKind).toEqual(dInline.byKind);
+    expect(dWoven.byKind.ComparisonTable).toBe(1);
+    expect(dWoven.byKind.DiagramFlow).toBe(1);
+    expect(dWoven.totalValid).toBe(dInline.totalValid);
+    expect(dWoven.totalValid).toBe(2);
+    expect(dWoven.parseFailures).toBe(0);
+    expect(dInline.parseFailures).toBe(0);
+    expect(dWoven.mermaidBlocks).toBe(0);
+    expect(dInline.mermaidBlocks).toBe(0);
+  });
+
+  it('source-blindness: weave fallback path (no anchors) still counts in byKind', () => {
+    // Extra defense: when the extractor returns no positional hints, weave
+    // falls through to the 30% fallback. The fence shape must still match
+    // BLOCK_RE — otherwise hint-less extractions would be invisible to the
+    // density metric, biasing measurements.
+    const proseOnly =
+      'A'.repeat(200) +
+      '\n\n' +
+      'B'.repeat(200) +
+      '\n\n' +
+      'C'.repeat(200);
+    const diagrams: ExtractedDiagram[] = [
+      {
+        payload: JSON.parse(VALID_DEFINITION_LIST) as DiagramPayload,
+      },
+    ];
+    const woven = weaveDiagrams(proseOnly, diagrams);
+    const d = computeDiagramDensity(woven);
+    expect(d.byKind.DefinitionList).toBe(1);
+    expect(d.totalValid).toBe(1);
+    expect(d.parseFailures).toBe(0);
   });
 
   it('returns totalValid = sum of byKind counts', () => {

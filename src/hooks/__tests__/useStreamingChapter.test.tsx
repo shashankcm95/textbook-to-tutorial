@@ -29,7 +29,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { renderHook } from '@testing-library/react';
+import { renderHook, act } from '@testing-library/react';
 import { useStreamingChapter } from '../useStreamingChapter';
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -262,5 +262,173 @@ describe('useStreamingChapter — per-chapter URL + re-open on chapterIdx change
     // should have been aborted by the teardown path so the server-side
     // OpenAI fetch tied to chapter 0 stops generating tokens.
     expect(abortSpies.some((s) => s.mock.calls.length > 0)).toBe(true);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Sprint H Wave 1 (Builder E) — diagrams-extracted state plumbing
+// ───────────────────────────────────────────────────────────────────────────
+//
+// The hook exposes isExtracting / extractedDiagramCount / extractedDroppedCount
+// driven by two new SSE frames:
+//   - 'narrative-stream-complete' → isExtracting = true
+//   - 'diagrams-extracted'        → isExtracting = false; counts populated
+//
+// FakeEventSource's `addEventListener` is a vi.fn(); we drive frames by
+// finding the registered listener from the mock's call args and invoking it
+// with a synthetic MessageEvent. Wrapping in `act()` is required so React 18
+// flushes the state updates before our assertion runs.
+
+/** Find the listener registered for `eventName` on the freshest mock. */
+function findListener(
+  instance: MockEventSource,
+  eventName: string,
+): ((ev: Event) => void) | null {
+  const calls = instance.addEventListener.mock.calls as Array<
+    [string, (ev: Event) => void]
+  >;
+  for (let i = calls.length - 1; i >= 0; i -= 1) {
+    const [name, fn] = calls[i] ?? [];
+    if (name === eventName && typeof fn === 'function') return fn;
+  }
+  return null;
+}
+
+/** Synthesize a MessageEvent with the given JSON-stringified data payload. */
+function fakeMessageEvent(data: unknown): MessageEvent {
+  // jsdom's MessageEvent constructor accepts a MessageEventInit; we encode
+  // the data string per the SSE wire shape (the hook parses with JSON.parse
+  // inside its safeParse helper).
+  return new MessageEvent('message', { data: JSON.stringify(data) });
+}
+
+describe('useStreamingChapter — diagrams-extracted state (Sprint H Wave 1)', () => {
+  it('exposes isExtracting=false / counts=null on initial mount', () => {
+    const onFrame = vi.fn();
+    const { result } = renderHook(() =>
+      useStreamingChapter({ tutorialId: 'abc', chapterIdx: 0, onFrame }),
+    );
+    expect(result.current.isExtracting).toBe(false);
+    expect(result.current.extractedDiagramCount).toBeNull();
+    expect(result.current.extractedDroppedCount).toBeNull();
+  });
+
+  it('flips isExtracting=true on narrative-stream-complete frame', () => {
+    const onFrame = vi.fn();
+    const { result } = renderHook(() =>
+      useStreamingChapter({ tutorialId: 'abc', chapterIdx: 0, onFrame }),
+    );
+    const es = createdInstances[0]!;
+    const listener = findListener(es, 'narrative-stream-complete');
+    expect(listener).not.toBeNull();
+    act(() => {
+      listener!(fakeMessageEvent({ chapterId: 'ch-abc' }));
+    });
+    expect(result.current.isExtracting).toBe(true);
+    // onFrame still receives the frame as an opaque delivery — existing
+    // consumers are not broken by the new frame.
+    expect(onFrame).toHaveBeenCalledWith({
+      event: 'narrative-stream-complete',
+      data: { chapterId: 'ch-abc' },
+    });
+  });
+
+  it('flips isExtracting=false and populates counts on diagrams-extracted frame', () => {
+    const onFrame = vi.fn();
+    const { result } = renderHook(() =>
+      useStreamingChapter({ tutorialId: 'abc', chapterIdx: 0, onFrame }),
+    );
+    const es = createdInstances[0]!;
+
+    // First: narrative-stream-complete to set isExtracting=true.
+    const onStreamComplete = findListener(es, 'narrative-stream-complete');
+    act(() => {
+      onStreamComplete!(fakeMessageEvent({ chapterId: 'ch-abc' }));
+    });
+    expect(result.current.isExtracting).toBe(true);
+
+    // Then: diagrams-extracted with a real payload.
+    const onDiagrams = findListener(es, 'diagrams-extracted');
+    expect(onDiagrams).not.toBeNull();
+    act(() => {
+      onDiagrams!(
+        fakeMessageEvent({ count: 3, droppedCount: 1, costUsd: 0.0006 }),
+      );
+    });
+    expect(result.current.isExtracting).toBe(false);
+    expect(result.current.extractedDiagramCount).toBe(3);
+    expect(result.current.extractedDroppedCount).toBe(1);
+  });
+
+  it('clears isExtracting on chapter-complete even when diagrams-extracted never arrives (fail-open path)', () => {
+    const onFrame = vi.fn();
+    const { result } = renderHook(() =>
+      useStreamingChapter({ tutorialId: 'abc', chapterIdx: 0, onFrame }),
+    );
+    const es = createdInstances[0]!;
+    act(() => {
+      findListener(es, 'narrative-stream-complete')!(
+        fakeMessageEvent({ chapterId: 'ch-abc' }),
+      );
+    });
+    expect(result.current.isExtracting).toBe(true);
+
+    // Extraction fail-open: no diagrams-extracted frame arrives; the
+    // chapter-complete frame is the bulkhead-safe place to clear the
+    // indicator. Counts stay null (no structured diagrams this run).
+    act(() => {
+      findListener(es, 'chapter-complete')!(
+        fakeMessageEvent({ chapterId: 'ch-abc', questionsCount: 5 }),
+      );
+    });
+    expect(result.current.isExtracting).toBe(false);
+    expect(result.current.extractedDiagramCount).toBeNull();
+    expect(result.current.extractedDroppedCount).toBeNull();
+  });
+
+  it('resets extraction-indicator state when chapterIdx changes', () => {
+    const onFrame = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ chapterIdx }: { chapterIdx: number }) =>
+        useStreamingChapter({ tutorialId: 'abc', chapterIdx, onFrame }),
+      { initialProps: { chapterIdx: 0 } },
+    );
+    const firstEs = createdInstances[0]!;
+    act(() => {
+      findListener(firstEs, 'narrative-stream-complete')!(
+        fakeMessageEvent({ chapterId: 'ch-0' }),
+      );
+      findListener(firstEs, 'diagrams-extracted')!(
+        fakeMessageEvent({ count: 2, droppedCount: 0, costUsd: 0.0005 }),
+      );
+    });
+    expect(result.current.extractedDiagramCount).toBe(2);
+
+    // Swap to a new chapter — counts must reset so the previous chapter's
+    // numbers don't leak into the new chapter's UX before its own
+    // diagrams-extracted frame arrives.
+    rerender({ chapterIdx: 1 });
+    expect(result.current.isExtracting).toBe(false);
+    expect(result.current.extractedDiagramCount).toBeNull();
+    expect(result.current.extractedDroppedCount).toBeNull();
+  });
+
+  it('handles a malformed diagrams-extracted payload without throwing or corrupting state', () => {
+    const onFrame = vi.fn();
+    const { result } = renderHook(() =>
+      useStreamingChapter({ tutorialId: 'abc', chapterIdx: 0, onFrame }),
+    );
+    const es = createdInstances[0]!;
+    const listener = findListener(es, 'diagrams-extracted')!;
+    // Data is not valid JSON — safeParse returns null; the count branch is
+    // a no-op. isExtracting is still cleared (it's set unconditionally).
+    expect(() => {
+      act(() => {
+        listener(new MessageEvent('message', { data: 'not-json-at-all' }));
+      });
+    }).not.toThrow();
+    expect(result.current.isExtracting).toBe(false);
+    expect(result.current.extractedDiagramCount).toBeNull();
+    expect(result.current.extractedDroppedCount).toBeNull();
   });
 });

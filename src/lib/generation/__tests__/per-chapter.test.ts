@@ -59,6 +59,15 @@ let chapterRow: MockChapterRow;
 let tutorialRow: MockTutorialRow;
 const anchorViolationInserts: Array<Record<string, unknown>> = [];
 const fidelityInserts: Array<Record<string, unknown>> = [];
+// Sprint H Wave 1 (Builder D) — capture every tx.insert call so tests can
+// assert how many parses_cost rows landed and what their model/values were.
+// Each entry is { tableMarker, row }; we discriminate by which schema
+// import the SUT passed to tx.insert (better-sqlite3 doesn't expose a
+// stable name; we inspect the row shape instead).
+const txInserts: Array<{ table: 'parses_cost' | 'questions' | 'flashcards' | 'unknown'; row: Record<string, unknown> }> = [];
+// Sprint H Wave 1: capture the chapters.narrative value persisted in the
+// final transaction so tests can assert "the WOVEN narrative reaches DB".
+const chapterUpdates: Array<Record<string, unknown>> = [];
 const claimRunMock = vi.fn(() => ({ changes: 1 }));
 
 // Minimal Drizzle stubs. Each builder method returns `this` so the SUT's
@@ -115,10 +124,64 @@ vi.mock('@/db/client', () => {
       return captureChain;
     }),
     transaction: vi.fn((fn: (tx: unknown) => void) => {
-      // Pass a transaction shim with the same methods we use inside the txn.
+      // Sprint H Wave 1 (Builder D): capture writes inside the transaction
+      // so tests can assert that the WOVEN narrative reached chapters.narrative
+      // AND that a third parses_cost row landed for the extract call.
+      // Discrimination by row-shape: parses_cost rows always have
+      // `costUsd`+`promptTokens`; questions have `prompt`+`optionsJson`;
+      // flashcards have `front`+`back`.
+      const txUpdateChain = {
+        set: vi.fn((row: Record<string, unknown>) => {
+          chapterUpdates.push(row);
+          return txUpdateChain;
+        }),
+        where: vi.fn(() => txUpdateChain),
+        run: vi.fn(),
+      };
+      function txInsertChain(table: 'parses_cost' | 'questions' | 'flashcards' | 'unknown') {
+        const chain = {
+          values: vi.fn((row: Record<string, unknown>) => {
+            txInserts.push({ table, row });
+            return chain;
+          }),
+          run: vi.fn(),
+        };
+        return chain;
+      }
       const tx = {
-        update: vi.fn(() => updateChain),
-        insert: vi.fn(() => insertChain),
+        update: vi.fn(() => txUpdateChain),
+        insert: vi.fn((maybeTable: unknown) => {
+          // Cheap discriminator — we don't know the table object identity,
+          // so we let values() do the row-shape discrimination instead.
+          // Pre-allocate a chain; the first values() call decides the table.
+          let tableForChain: 'parses_cost' | 'questions' | 'flashcards' | 'unknown' = 'unknown';
+          const chain = {
+            values: vi.fn((row: Record<string, unknown>) => {
+              if ('promptTokens' in row && 'costUsd' in row && 'validationDropCount' in row) {
+                tableForChain = 'parses_cost';
+                txInserts.push({ table: tableForChain, row });
+              } else if ('prompt' in row && 'optionsJson' in row) {
+                tableForChain = 'questions';
+                txInserts.push({ table: tableForChain, row });
+              } else if ('front' in row && 'back' in row) {
+                tableForChain = 'flashcards';
+                txInserts.push({ table: tableForChain, row });
+              } else if ('overallScore' in row) {
+                // chapter_fidelity_scores — track in the pre-existing
+                // fidelityInserts bucket so legacy assertions keep working.
+                fidelityInserts.push(row);
+              } else {
+                txInserts.push({ table: 'unknown', row });
+              }
+              return chain;
+            }),
+            run: vi.fn(),
+          };
+          // Silence unused-var warning while keeping the maybeTable arg for parity with Drizzle.
+          void maybeTable;
+          void txInsertChain;
+          return chain;
+        }),
       };
       fn(tx);
     }),
@@ -160,6 +223,49 @@ vi.mock('@/lib/s3-chunks', () => ({
   resolveChunksBucket: vi.fn(() => 'test-bucket'),
   readVoiceProfile: (args: unknown) => readVoiceProfileMock(args),
   readAnchorWhitelist: (args: unknown) => readAnchorWhitelistMock(args),
+}));
+
+// Sprint H Wave 1 (Builder D) — mock the diagram extractor + weaver so the
+// SUT's transitive imports don't pull in `@/lib/openai/client` (which would
+// trigger env validation at module load).
+const extractDiagramsMock = vi.fn();
+vi.mock('@/lib/openai/extract-diagrams', () => ({
+  extractDiagrams: (args: unknown) => extractDiagramsMock(args),
+}));
+
+const weaveDiagramsMock = vi.fn();
+vi.mock('@/lib/diagrams/weave', () => ({
+  weaveDiagrams: (narrative: string, diagrams: unknown[]) =>
+    weaveDiagramsMock(narrative, diagrams),
+}));
+
+// Mock cost-cap so we can drive the "cost-cap rejects extract" test path
+// AND avoid the SUM-query default behavior. Default implementation: no-op
+// (pass the budget); per-test mockRejectedValue for the rejection path.
+const assertCostBudgetMock = vi.fn();
+vi.mock('@/lib/openai/cost-cap', () => ({
+  assertCostBudget: (...args: unknown[]) => assertCostBudgetMock(...args),
+  CostCapExceeded: class CostCapExceeded extends Error {
+    readonly name = 'CostCapExceeded';
+  },
+}));
+
+// Mock estimateCost so we don't have to construct a real tokenizer / pricing
+// path in the test. Returns a tiny stub; per-chapter only uses
+// `estimatedCostUsd` to pass into assertCostBudget (which is itself mocked).
+vi.mock('@/lib/openai/cost', () => ({
+  estimateCost: vi.fn(() => ({
+    model: 'gpt-4o-mini',
+    estimatedPromptTokens: 100,
+    estimatedCompletionTokens: 2048,
+    estimatedCostUsd: 0.001,
+  })),
+}));
+
+// Mock the extract prompt so the cost-estimate call in per-chapter.ts
+// doesn't transitively bring in any heavier prompt-builder modules.
+vi.mock('@/lib/prompts/extract-diagrams', () => ({
+  EXTRACT_SYSTEM_PROMPT: 'mocked system prompt',
 }));
 
 // Imports AFTER mocks.
@@ -221,7 +327,22 @@ beforeEach(() => {
   vi.clearAllMocks();
   anchorViolationInserts.length = 0;
   fidelityInserts.length = 0;
+  txInserts.length = 0;
+  chapterUpdates.length = 0;
   dbSelectCallIdx = 0;
+
+  // Default Sprint H Wave 1 mocks: extract returns zero diagrams, weave is
+  // an identity (no diagrams = no fences = pass-through). Cost-cap passes.
+  extractDiagramsMock.mockResolvedValue({
+    diagrams: [],
+    droppedCount: 0,
+    promptTokens: 50,
+    completionTokens: 0,
+    costUsd: 0.0001,
+    model: 'gpt-4o-mini',
+  });
+  weaveDiagramsMock.mockImplementation((narrative: string) => narrative);
+  assertCostBudgetMock.mockResolvedValue(undefined);
 
   chapterRow = {
     id: 'chapter-1',
@@ -342,5 +463,290 @@ describe('per-chapter — Feature B Wave 3 integration', () => {
     await generateChapter({ tutorialId: 'tutorial-1', chapterIdx: 0 });
 
     expect(anchorViolationInserts).toHaveLength(0);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Sprint H Wave 1 (Builder D) — extract + weave integration tests.
+//
+// What we verify:
+//   1. Happy path — extractDiagrams returns valid + dropped, weave runs, the
+//      WOVEN narrative reaches chapters.narrative, a third parses_cost row
+//      lands with the extract call's tokens/cost, the onDiagramsExtracted
+//      callback fires with {count, droppedCount, costUsd}.
+//   2. Empty-diagrams path — extract returns zero diagrams, weave is NOT
+//      called (no-op), the original narrative is persisted, the callback
+//      still fires with count=0, droppedCount=0, costUsd>0.
+//   3. Fail-open — extractDiagrams throws, chapter still completes, the
+//      ORIGINAL narrative is persisted, the callback is NOT invoked, no
+//      exception bubbles, NO third parses_cost row appears.
+//   4. Cost-cap rejection — assertCostBudget throws, extractDiagrams is
+//      NEVER called, chapter completes with original narrative, callback
+//      NOT invoked, NO third parses_cost row.
+//   5. parses_cost row presence on happy path — second 4o-mini row landed
+//      with the extract call's exact token/cost values.
+//
+// Strategy: extend the existing mock layer with extractDiagramsMock + the
+// per-call weave / cost-cap implementations declared above. Tests inspect
+// the captured `txInserts` + `chapterUpdates` to assert persistence shape.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe('per-chapter — Sprint H Wave 1 (extract + weave integration)', () => {
+  beforeEach(() => {
+    // Pre-Sprint-H tests don't depend on S3 artifacts; null both so the
+    // anchor validator path is a no-op and we focus on extract behavior.
+    readVoiceProfileMock.mockResolvedValue(null);
+    readAnchorWhitelistMock.mockResolvedValue(null);
+  });
+
+  it('happy path: 2 diagrams + 1 dropped → woven narrative persisted, third parses_cost row, callback fires', async () => {
+    // Extractor returns 2 valid diagrams + 1 dropped.
+    const fakeDiagrams = [
+      { kind: 'ComparisonTable', title: 'A vs B', columns: ['A', 'B'], rows: [] } as unknown,
+      { kind: 'DefinitionList', items: [] } as unknown,
+    ];
+    extractDiagramsMock.mockResolvedValue({
+      diagrams: fakeDiagrams,
+      droppedCount: 1,
+      promptTokens: 250,
+      completionTokens: 180,
+      costUsd: 0.00075,
+      model: 'gpt-4o-mini',
+    });
+    // Weave emits ```diagram fences appended to the input narrative.
+    const wovenSentinel =
+      'Some narrative output.\n\n```diagram\n{"kind":"ComparisonTable"}\n```\n\n```diagram\n{"kind":"DefinitionList"}\n```\n';
+    weaveDiagramsMock.mockReturnValue(wovenSentinel);
+
+    const onDiagramsExtracted = vi.fn();
+    const result = await generateChapter({
+      tutorialId: 'tutorial-1',
+      chapterIdx: 0,
+      onDiagramsExtracted,
+    });
+
+    // Cost-cap gate ran BEFORE the extract call.
+    expect(assertCostBudgetMock).toHaveBeenCalledTimes(1);
+    const [capTutorialId, capProjectedCost] = assertCostBudgetMock.mock.calls[0];
+    expect(capTutorialId).toBe('tutorial-1');
+    expect(typeof capProjectedCost).toBe('number');
+
+    // Extractor was called with the narrative (not the woven version).
+    expect(extractDiagramsMock).toHaveBeenCalledTimes(1);
+    const extractArgs = extractDiagramsMock.mock.calls[0][0];
+    expect(extractArgs.narrative).toBe('Some narrative output.');
+
+    // Weave was called with original narrative + the 2 diagrams (wrapped).
+    expect(weaveDiagramsMock).toHaveBeenCalledTimes(1);
+    const [weaveNarrative, weaveDiagrams_] = weaveDiagramsMock.mock.calls[0];
+    expect(weaveNarrative).toBe('Some narrative output.');
+    expect(weaveDiagrams_).toHaveLength(2);
+    expect(weaveDiagrams_[0].payload).toBe(fakeDiagrams[0]);
+    expect(weaveDiagrams_[1].payload).toBe(fakeDiagrams[1]);
+
+    // Persistence — the WOVEN narrative reached chapters.narrative.
+    expect(chapterUpdates).toHaveLength(1);
+    expect(chapterUpdates[0]?.narrative).toBe(wovenSentinel);
+
+    // SSE callback fired with the contract payload.
+    expect(onDiagramsExtracted).toHaveBeenCalledTimes(1);
+    expect(onDiagramsExtracted).toHaveBeenCalledWith({
+      count: 2,
+      droppedCount: 1,
+      costUsd: 0.00075,
+    });
+
+    // Third parses_cost row landed for extract (narrative + quiz + extract = 3).
+    const parsesCostRows = txInserts.filter((e) => e.table === 'parses_cost');
+    expect(parsesCostRows).toHaveLength(3);
+    // Find the extract row by its exact cost-usd fingerprint.
+    const extractRow = parsesCostRows.find((e) => e.row.costUsd === 0.00075);
+    expect(extractRow).toBeTruthy();
+    expect(extractRow?.row.model).toBe('gpt-4o-mini');
+    expect(extractRow?.row.promptTokens).toBe(250);
+    expect(extractRow?.row.completionTokens).toBe(180);
+    expect(extractRow?.row.validationDropCount).toBe(0);
+
+    // Result.narrative returns the woven string (callers reading it in-
+    // memory see what's persisted).
+    expect(result.narrative).toBe(wovenSentinel);
+    // totalCostUsd includes the extract spend.
+    expect(result.totalCostUsd).toBeGreaterThan(0.001 + 0.0005);
+  });
+
+  it('empty diagrams: weave NOT called, original narrative persisted, callback fires with count=0', async () => {
+    extractDiagramsMock.mockResolvedValue({
+      diagrams: [],
+      droppedCount: 0,
+      promptTokens: 200,
+      completionTokens: 5,
+      costUsd: 0.00005,
+      model: 'gpt-4o-mini',
+    });
+
+    const onDiagramsExtracted = vi.fn();
+    await generateChapter({
+      tutorialId: 'tutorial-1',
+      chapterIdx: 0,
+      onDiagramsExtracted,
+    });
+
+    // Extract ran but weave was NOT called (no diagrams to splice).
+    expect(extractDiagramsMock).toHaveBeenCalledTimes(1);
+    expect(weaveDiagramsMock).not.toHaveBeenCalled();
+
+    // Original narrative reached chapters.narrative untouched.
+    expect(chapterUpdates).toHaveLength(1);
+    expect(chapterUpdates[0]?.narrative).toBe('Some narrative output.');
+
+    // Callback still fires (extract succeeded, just emitted zero diagrams).
+    expect(onDiagramsExtracted).toHaveBeenCalledTimes(1);
+    expect(onDiagramsExtracted).toHaveBeenCalledWith({
+      count: 0,
+      droppedCount: 0,
+      costUsd: 0.00005,
+    });
+
+    // Three parses_cost rows still: narrative + quiz + extract.
+    const parsesCostRows = txInserts.filter((e) => e.table === 'parses_cost');
+    expect(parsesCostRows).toHaveLength(3);
+  });
+
+  it('fail-open: extractDiagrams throws → chapter still completes, original narrative persisted, callback NOT invoked', async () => {
+    extractDiagramsMock.mockRejectedValue(
+      new Error('extract-diagrams: model refused (safety)'),
+    );
+
+    const onDiagramsExtracted = vi.fn();
+    const result = await generateChapter({
+      tutorialId: 'tutorial-1',
+      chapterIdx: 0,
+      onDiagramsExtracted,
+    });
+
+    // No exception bubbled.
+    expect(result.status).toBe('complete');
+
+    // Weave never ran (extract failed before it could).
+    expect(weaveDiagramsMock).not.toHaveBeenCalled();
+
+    // Original narrative reached chapters.narrative (fail-open contract).
+    expect(chapterUpdates).toHaveLength(1);
+    expect(chapterUpdates[0]?.narrative).toBe('Some narrative output.');
+
+    // No callback fired (fail-open path skips the SSE signal).
+    expect(onDiagramsExtracted).not.toHaveBeenCalled();
+
+    // Only TWO parses_cost rows — extract failed before it could bill.
+    const parsesCostRows = txInserts.filter((e) => e.table === 'parses_cost');
+    expect(parsesCostRows).toHaveLength(2);
+  });
+
+  it('cost-cap rejection: assertCostBudget throws → extract NEVER called, chapter completes with original narrative', async () => {
+    assertCostBudgetMock.mockRejectedValue(
+      Object.assign(new Error('Cost cap exceeded for tutorial=tutorial-1'), {
+        name: 'CostCapExceeded',
+      }),
+    );
+
+    const onDiagramsExtracted = vi.fn();
+    const result = await generateChapter({
+      tutorialId: 'tutorial-1',
+      chapterIdx: 0,
+      onDiagramsExtracted,
+    });
+
+    // Cost-cap was checked.
+    expect(assertCostBudgetMock).toHaveBeenCalledTimes(1);
+    // Extract NEVER called (gate rejected upstream).
+    expect(extractDiagramsMock).not.toHaveBeenCalled();
+    // Weave NEVER called.
+    expect(weaveDiagramsMock).not.toHaveBeenCalled();
+    // Chapter still completed.
+    expect(result.status).toBe('complete');
+    // Original narrative persisted.
+    expect(chapterUpdates).toHaveLength(1);
+    expect(chapterUpdates[0]?.narrative).toBe('Some narrative output.');
+    // No callback fired.
+    expect(onDiagramsExtracted).not.toHaveBeenCalled();
+    // Only TWO parses_cost rows.
+    const parsesCostRows = txInserts.filter((e) => e.table === 'parses_cost');
+    expect(parsesCostRows).toHaveLength(2);
+  });
+
+  // Sprint H Wave 3 fix (Rev D HIGH-1) — gate-blocking regression:
+  // before this fix, persistNarrativeOnly (called on the quiz-failure path)
+  // wrote `narrativeResult.narrative` (raw prose) instead of the wovenNarrative
+  // that the extractor + weave had already produced. The user would refresh
+  // the chapter, see status='partial', and the diagrams would be silently
+  // gone — even though the extract LLM call had succeeded and billed.
+  it('quiz-failure path: extract succeeded → woven narrative still persisted + extract cost recorded', async () => {
+    const fakeDiagrams = [
+      { kind: 'ComparisonTable', title: 'A vs B', columns: ['A', 'B'], rows: [] } as unknown,
+    ];
+    extractDiagramsMock.mockResolvedValue({
+      diagrams: fakeDiagrams,
+      droppedCount: 0,
+      promptTokens: 200,
+      completionTokens: 100,
+      costUsd: 0.0006,
+      model: 'gpt-4o-mini',
+    });
+    const wovenSentinel =
+      'Some narrative output.\n\n```diagram\n{"kind":"ComparisonTable"}\n```\n';
+    weaveDiagramsMock.mockReturnValue(wovenSentinel);
+
+    // Quiz call throws — narrative succeeded but the quiz LLM 500s/refuses.
+    generateQuizFromNarrativeMock.mockRejectedValue(
+      new Error('quiz-from-narrative: model timeout'),
+    );
+
+    const onDiagramsExtracted = vi.fn();
+    await expect(
+      generateChapter({
+        tutorialId: 'tutorial-1',
+        chapterIdx: 0,
+        onDiagramsExtracted,
+      }),
+    ).rejects.toThrow(/quiz-from-narrative/);
+
+    // The partial-state update wrote the WOVEN narrative — not the raw.
+    expect(chapterUpdates).toHaveLength(1);
+    expect(chapterUpdates[0]?.status).toBe('partial');
+    expect(chapterUpdates[0]?.narrative).toBe(wovenSentinel);
+
+    // parses_cost rows: narrative + extract (2 total — no quiz row since it
+    // never completed). Both must be present so we don't underreport spend.
+    const parsesCostRows = txInserts.filter((e) => e.table === 'parses_cost');
+    expect(parsesCostRows).toHaveLength(2);
+    // The extract row is identifiable by its cost-usd fingerprint.
+    const extractRow = parsesCostRows.find((e) => e.row.costUsd === 0.0006);
+    expect(extractRow).toBeTruthy();
+    expect(extractRow?.row.stage).toBe('extract-diagrams');
+    // Narrative row also has the stage set.
+    const narrativeRow = parsesCostRows.find((e) => e.row.model === 'gpt-4o');
+    expect(narrativeRow?.row.stage).toBe('narrative');
+  });
+
+  it('no onDiagramsExtracted callback provided → no throw, extract+weave still wired', async () => {
+    // Defensive: optional callback must be safe to omit (SSE-less callers
+    // like the prefetch path do not pass it).
+    extractDiagramsMock.mockResolvedValue({
+      diagrams: [{ kind: 'DefinitionList', items: [] } as unknown],
+      droppedCount: 0,
+      promptTokens: 150,
+      completionTokens: 50,
+      costUsd: 0.0002,
+      model: 'gpt-4o-mini',
+    });
+    weaveDiagramsMock.mockReturnValue('Some narrative output.\n\n```diagram\n{}\n```\n');
+
+    // No onDiagramsExtracted passed.
+    const result = await generateChapter({ tutorialId: 'tutorial-1', chapterIdx: 0 });
+
+    expect(result.status).toBe('complete');
+    expect(extractDiagramsMock).toHaveBeenCalledTimes(1);
+    expect(weaveDiagramsMock).toHaveBeenCalledTimes(1);
+    expect(chapterUpdates[0]?.narrative).toContain('```diagram');
   });
 });
