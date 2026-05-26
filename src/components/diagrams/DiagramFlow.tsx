@@ -36,10 +36,16 @@ const PITCH_Y = 96; // TB direction
 // Estimate text width by character count at ~7px per glyph at the 12px
 // font. Good enough for the centering math — labels are capped at 32
 // chars by the schema's `ShortLabel`.
+// Persona-review 2026-05-26 (Riley): functional summary, not structural
+// verbatim. Tells the screen-reader WHY to navigate this diagram, not
+// what data structure it is.
 function buildAriaLabel(payload: DiagramFlowPayload): string {
+  const stepCount = payload.nodes.length;
   const labels = payload.nodes.map((n) => n.label);
-  const prefix = payload.title ? payload.title : 'Pipeline';
-  return `${prefix}: ${labels.join(' → ')}`;
+  const heading = payload.title
+    ? `Process diagram for "${payload.title}"`
+    : 'Process diagram';
+  return `${heading}: ${stepCount} step${stepCount === 1 ? '' : 's'} from start to end — ${labels.join(' → ')}.`;
 }
 
 export default function DiagramFlow({ payload }: { payload: DiagramFlowPayload }) {

@@ -54,9 +54,14 @@ const BOTTOM_PAD = 32;
 const SELF_LOOP_DX = 40;     // how far the self-message loops to the right
 const SELF_LOOP_DY = 16;     // vertical span of the self-loop
 
+// Persona-review 2026-05-26 (Riley): functional summary.
 function buildAriaLabel(payload: SequenceDiagramPayload): string {
-  const prefix = payload.title ?? 'Sequence diagram';
-  return `${prefix}: ${payload.actors.join(', ')}`;
+  const actorCount = payload.actors.length;
+  const messageCount = payload.messages.length;
+  const heading = payload.title
+    ? `Sequence diagram for "${payload.title}"`
+    : 'Sequence diagram';
+  return `${heading}: ${messageCount} message${messageCount === 1 ? '' : 's'} between ${actorCount} actor${actorCount === 1 ? '' : 's'} (${payload.actors.join(', ')}).`;
 }
 
 export default function SequenceDiagram({ payload }: { payload: SequenceDiagramPayload }) {

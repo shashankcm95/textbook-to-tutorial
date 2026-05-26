@@ -60,8 +60,19 @@ import { useEffect, useState, useRef } from 'react';
  *  100 simultaneous tutorial views don't hammer the server. */
 const POLL_INTERVAL_MS = 15_000;
 
-const COLOR_BAND_WARN = 0.5;
-const COLOR_BAND_DANGER = 0.8;
+// Persona-review 2026-05-26 (Riley/Priya): the old thresholds (50% warn,
+// 80% danger) painted the chip red during normal reading sessions and
+// communicated anxiety with no explanation. New thresholds keep it calm
+// until the user is genuinely close to the cap, and the tooltip explains
+// what hitting 100% actually means (gen pauses; existing content stays).
+const COLOR_BAND_WARN = 0.85;
+const COLOR_BAND_DANGER = 0.95;
+
+// Tooltip copy attached to the chip so users understand the cap's effect.
+// Surfaces in BOTH the native `title=` attribute and the aria-description
+// for screen readers.
+const COST_CAP_TOOLTIP =
+  'When 100% of the cap is reached, new chapter generation pauses. Existing chapters stay readable.';
 
 // ───────────────────────────────────────────────────────────────────────────
 // Props + state types
@@ -268,7 +279,8 @@ export function CostChip({ tutorialId, costUsdLive }: CostChipProps) {
     <span
       role="status"
       aria-live="polite"
-      aria-label={`Cost so far: ${formatUsd(effectiveCost)} of ${formatUsd(state.costCapUsd)} cap, ${Math.round(pct * 100)} percent, ${bandLabel}`}
+      aria-label={`Cost so far: ${formatUsd(effectiveCost)} of ${formatUsd(state.costCapUsd)} cap, ${Math.round(pct * 100)} percent, ${bandLabel}. ${COST_CAP_TOOLTIP}`}
+      title={COST_CAP_TOOLTIP}
       className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium ${colorClasses}`}
     >
       <Dot bandClass={DOT_CLASSES[band]} />

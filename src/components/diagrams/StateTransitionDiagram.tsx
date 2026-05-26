@@ -112,10 +112,16 @@ function dedupeTransitions(
 // aria-label builder.
 // ---------------------------------------------------------------------------
 
+// Persona-review 2026-05-26 (Riley): functional summary, not structural.
+// Conveys count + purpose first; state list second.
 function describe(payload: StateTransitionDiagramPayload): string {
+  const stateCount = payload.states.length;
+  const transitionCount = payload.transitions.length;
   const labels = payload.states.map((s) => s.label).join(', ');
-  const head = payload.title ? `${payload.title}: ` : 'State machine: ';
-  return `${head}${labels}`;
+  const heading = payload.title
+    ? `State machine for "${payload.title}"`
+    : 'State machine';
+  return `${heading}: ${stateCount} state${stateCount === 1 ? '' : 's'} (${labels}) connected by ${transitionCount} transition${transitionCount === 1 ? '' : 's'}.`;
 }
 
 // ---------------------------------------------------------------------------

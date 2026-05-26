@@ -207,10 +207,20 @@ function getMaxDepth(node: DecisionTreeNode, depth = 0): number {
   );
 }
 
+// Persona-review 2026-05-26 (Riley): functional summary — count of
+// outcomes + opening question, not "rooted at" implementation language.
+function countOutcomes(node: DecisionTreeNode): number {
+  if (isLeaf(node)) return 1;
+  return countOutcomes(node.yes) + countOutcomes(node.no);
+}
+
 function buildAriaLabel(payload: DecisionTreePayload): string {
-  const prefix = payload.title ? payload.title : 'Decision tree';
+  const outcomeCount = countOutcomes(payload.root);
   const rootText = nodeText(payload.root);
-  return `${prefix}: rooted at "${rootText}"`;
+  const heading = payload.title
+    ? `Decision tree for "${payload.title}"`
+    : 'Decision tree';
+  return `${heading}: ${outcomeCount} possible outcome${outcomeCount === 1 ? '' : 's'}, starting with the question "${rootText}".`;
 }
 
 export default function DecisionTree({
