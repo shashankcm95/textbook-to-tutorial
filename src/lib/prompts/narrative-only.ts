@@ -80,6 +80,7 @@ function baseSystemPromptLines(): string[] {
     '- Embed `[ref:pageN:paragraphM]` markers in the narrative right after the sentence that draws from each paragraph.',
     '- Use ONLY page+paragraph indices present in the SOURCE PARAGRAPHS list provided in the user message.',
     '- Aim for at least one citation every 80-120 words of narrative. Density matters.',
+    '- Each citation cites ONE source paragraph. Format: `[ref:pageN:paragraphM]`. The paragraphM is a single integer — never a range like `paragraph3-5`. If a sentence in your narrative draws from multiple source paragraphs, emit MULTIPLE separate single-paragraph citations: `Foo and bar [ref:page42:paragraph3][ref:page42:paragraph4].` Range syntax is FORBIDDEN: paragraph ranges hide which specific paragraph supports which specific claim.',
     '',
     'FIDELITY RULES (load-bearing — refined v3 after multi-agent critique found voice + caveat-pattern + search-term anchors still dropped):',
     '',
