@@ -49,10 +49,10 @@ export const users = sqliteTable(
     sessionCookieHash: text('session_cookie_hash').notNull().unique(), // sha256 of signed session cookie
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
-      .default(sql`CURRENT_TIMESTAMP`),
+      .default(sql`(unixepoch())`),
     lastSeenAt: integer('last_seen_at', { mode: 'timestamp' })
       .notNull()
-      .default(sql`CURRENT_TIMESTAMP`),
+      .default(sql`(unixepoch())`),
   },
   (t) => ({
     byCookie: index('idx_users_cookie').on(t.sessionCookieHash),
@@ -92,7 +92,7 @@ export const tutorials = sqliteTable(
     totalChapters: integer('total_chapters'),                          // null until parsed
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
-      .default(sql`CURRENT_TIMESTAMP`),
+      .default(sql`(unixepoch())`),
     // ── lazy-hybrid-chunking (0001 migration) ────────────────────────
     /** S3 key prefix for parsed-chunk artifacts: `parsed/<sha256>`. NULL
      *  on legacy rows ingested before the lazy-chunking pipeline. */
@@ -335,7 +335,7 @@ export const parsesCost = sqliteTable(
     stage: text('stage'),
     createdAt: integer('created_at', { mode: 'timestamp' })
       .notNull()
-      .default(sql`CURRENT_TIMESTAMP`),
+      .default(sql`(unixepoch())`),
   },
   (t) => ({
     byTutorial: index('idx_cost_tutorial').on(t.tutorialId),
