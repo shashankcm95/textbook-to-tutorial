@@ -16,7 +16,20 @@
 // `process.env.COST_CAP_USD`, and it MUST restore the original value in a
 // finally block — other tests may rely on the boot value.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+// env.ts validates OPENAI_API_KEY + SESSION_SECRET at MODULE LOAD via
+// parseBootEnv(). vitest.config.ts is locked and doesn't load .env, so we
+// hoist a process.env stub above the `import { env }` below using vi.hoisted
+// (vitest re-orders the hoisted block above all module-resolution imports).
+// `||=` preserves any real values already in the process env (e.g. CI runs
+// with secrets exported) so the test mirrors real boot config when present.
+// SESSION_SECRET must avoid the placeholder regexes in env.ts:55 (e.g.
+// `/^x{3,}$/i`). Use a varied 48-char secret instead of repeated 'x'.
+vi.hoisted(() => {
+  process.env.OPENAI_API_KEY ||= 'sk-test-' + 'a'.repeat(40);
+  process.env.SESSION_SECRET ||= 'tEsT-S3cr3t-vitest-only-1234567890abcdefABCDEFAB';
+});
 
 import { env } from '../env';
 

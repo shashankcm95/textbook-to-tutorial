@@ -183,6 +183,12 @@ export function applyVariant(
       fileBackups.set(absDest, prior);
 
       const overrideContent = fs.readFileSync(absSrc, 'utf8');
+      // 2026-05-27 — variant.test "removes files that did not exist before"
+      // exposed: when `dest` points at a path whose PARENT directory doesn't
+      // yet exist (e.g. overriding `src/new-prompt.ts` in a sandbox tree),
+      // the write-rename below fails with ENOENT on the .eval-tmp write.
+      // mkdirSync(...{recursive:true}) is a no-op when the directory exists.
+      fs.mkdirSync(path.dirname(absDest), { recursive: true });
       // Write-rename for atomicity; matches the pattern in src/lib/db/migrate.ts.
       const tmp = `${absDest}.eval-tmp`;
       fs.writeFileSync(tmp, overrideContent, 'utf8');

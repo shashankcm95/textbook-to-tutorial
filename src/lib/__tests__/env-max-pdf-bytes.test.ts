@@ -15,7 +15,16 @@
 // `process.env.MAX_PDF_BYTES`, and it MUST restore the original value in a
 // finally block — other tests may rely on the boot value.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+// See env-cost-cap.test.ts for full rationale. parseBootEnv() requires these
+// two vars at MODULE LOAD; vi.hoisted runs the factory ABOVE the import line.
+// SESSION_SECRET must avoid the placeholder regexes in env.ts:55 (e.g.
+// `/^x{3,}$/i`). Use a varied 48-char secret instead of repeated 'x'.
+vi.hoisted(() => {
+  process.env.OPENAI_API_KEY ||= 'sk-test-' + 'a'.repeat(40);
+  process.env.SESSION_SECRET ||= 'tEsT-S3cr3t-vitest-only-1234567890abcdefABCDEFAB';
+});
 
 import { env } from '../env';
 

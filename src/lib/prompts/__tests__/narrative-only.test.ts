@@ -89,7 +89,10 @@ const EXISTING_RULE_FRAGMENTS = [
   '2. PRESERVE TERMINOLOGICAL PRECISION.',
   '3. MATCH THE AUTHOR\'S RHETORICAL VOICE.',
   '4. PRESERVE NAMED IDIOMS, HUMOR, AND SIGNATURE PHRASES.',
-  '5. PRESERVE THE "BUT CLAUSE" PATTERN.',
+  // PR #42 (Tier 1 persona-rewalk fix) strengthened this rule to call out
+  // practical-deployment caveats. Match the new prefix without the trailing
+  // period so the test survives further refinements of the rule body.
+  '5. PRESERVE THE "BUT CLAUSE" PATTERN',
   '6. PRESERVE IMPLEMENTATION-SPECIFIC SEARCH-TERM ANCHORS.',
   '7. PRESERVE CODE LISTINGS,',
   '8. PRESERVE FIGURE REFERENCES.',
