@@ -107,6 +107,36 @@ hard fence. Operators should set it well above expected per-PDF spend.
 | `pnpm db:generate` | Generate Drizzle migrations from schema |
 | `pnpm db:migrate` | Apply migrations to local SQLite |
 | `pnpm db:seed` | Seed reference rows (Leitner boxes, sample tutorial) |
+| `pnpm wipe-dev-db` | Destructive: clear DB + re-run migrations (interactive). S3 chunks survive. |
+| `pnpm logs:tail` | Tail today's structured-event log |
+| `pnpm logs:errors` | Show last 7 days of `level:"error"` events via `jq` |
+
+## Observability
+
+Server-side errors and warnings emit one structured JSONL line per event
+to `./logs/<YYYY-MM-DD>.jsonl` (mirrored to stdout/stderr). Each line:
+
+```json
+{"ts":"2026-05-27T18:39:28.123Z","level":"warn","event":"chapter.anchor.coverage.violated",
+ "tutorialId":"...","chapterId":"...","dropped":3,"expected":4,"score":0.25}
+```
+
+Event names follow `domain.subject.action` (`chapter.fidelity.score.failed`,
+`ingest.worker.rejected`, etc.). Useful greps:
+
+```bash
+# All errors in the last 24h
+jq 'select(.level=="error")' logs/$(date -u +%Y-%m-%d).jsonl
+
+# Just glossary issues
+jq 'select(.event | startswith("chapter.glossary."))' logs/*.jsonl
+
+# What failed on a specific tutorial
+jq --arg t "048a2797-..." 'select(.tutorialId==$t and .level!="info")' logs/*.jsonl
+```
+
+Logs are `gitignore`d. Cron-prune older than 30 days if disk pressure
+becomes an issue (it won't for personal use).
 
 ## License
 

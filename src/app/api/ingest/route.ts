@@ -28,6 +28,7 @@ import { tutorials, users } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { verifySession, SESSION_COOKIE_NAME } from '@/lib/session';
 import { ingestWorker } from '@/lib/ingest/worker';
+import { logger } from '@/lib/log';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -135,8 +136,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     await ensureUserRow(userId);
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error('[POST /api/ingest] ensureUserRow failed:', err);
+    logger.error('ingest.user_row.failed', { userId, err });
     return NextResponse.json({ error: 'failed to create user row' }, { status: 500 });
   }
 
@@ -150,8 +150,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       status: 'ingesting',
     });
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error('[POST /api/ingest] tutorial insert failed:', err);
+    logger.error('ingest.tutorial_insert.failed', {
+      userId,
+      tutorialId,
+      s3Url,
+      err,
+    });
     return NextResponse.json({ error: 'failed to create tutorial row' }, { status: 500 });
   }
 
@@ -161,8 +165,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // but defense-in-depth keeps a slip-up from killing the Node process.
   setImmediate(() => {
     ingestWorker(tutorialId).catch((err) => {
-      // eslint-disable-next-line no-console
-      console.error(`[POST /api/ingest] worker rejected for ${tutorialId}:`, err);
+      logger.error('ingest.worker.rejected', { tutorialId, err });
     });
   });
 

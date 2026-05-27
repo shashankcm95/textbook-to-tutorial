@@ -29,6 +29,7 @@
 
 import { eq, and } from 'drizzle-orm';
 import { db, rawDb } from '@/db/client';
+import { logger } from '@/lib/log';
 import {
   chapters,
   questions as questionsTable,
@@ -286,10 +287,11 @@ export async function generateChapter(
     // network, refusal) cannot fail the chapter. The SSE route sees the
     // absence of a `diagrams-extracted` frame and the streaming hook
     // treats it as "extraction skipped" (cosmetic; UX still correct).
-    // eslint-disable-next-line no-console
-    console.error(
-      `[per-chapter] diagram extraction failed for ${chapter.id}: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    logger.error('chapter.diagram.extract.failed', {
+      tutorialId,
+      chapterId: chapter.id,
+      err,
+    });
   }
 
   // ── 4.5. Validate whitelist-anchor coverage (Feature B' Wave 3) ──────
@@ -326,12 +328,14 @@ export async function generateChapter(
       });
       if (validation.missing.length > 0) {
         const missingTerms = validation.missing.map((m) => m.term);
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[per-chapter] anchor coverage violation for ${chapter.id}: ` +
-            `${validation.missing.length}/${validation.expected.length} dropped ` +
-            `(score=${validation.score.toFixed(3)}); missing=${JSON.stringify(missingTerms)}`,
-        );
+        logger.warn('chapter.anchor.coverage.violated', {
+          tutorialId,
+          chapterId: chapter.id,
+          dropped: validation.missing.length,
+          expected: validation.expected.length,
+          score: validation.score,
+          missingTerms,
+        });
         db.insert(chapterAnchorViolations)
           .values({
             id: crypto.randomUUID(),
@@ -346,10 +350,11 @@ export async function generateChapter(
           .run();
       }
     } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error(
-        `[per-chapter] anchor validation failed for ${chapter.id}: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      logger.error('chapter.anchor.validation.failed', {
+        tutorialId,
+        chapterId: chapter.id,
+        err,
+      });
     }
   }
 
@@ -542,10 +547,11 @@ export async function generateChapter(
         .run();
     });
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error(
-      `[per-chapter] fidelity scoring failed for ${chapter.id}: ${(err as Error).message}`,
-    );
+    logger.error('chapter.fidelity.score.failed', {
+      tutorialId,
+      chapterId: chapter.id,
+      err,
+    });
   }
 
   onChapterComplete?.();
@@ -603,11 +609,14 @@ async function markFailed(chapterId: string, message: string): Promise<void> {
     rawDb
       .prepare("UPDATE chapters SET status='failed' WHERE id = ?")
       .run(chapterId);
-    // eslint-disable-next-line no-console
-    console.error(`[per-chapter] chapter ${chapterId} failed: ${message}`);
+    logger.error('chapter.generation.failed', { chapterId, message });
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error(`[per-chapter] CRITICAL: failed to mark chapter failed:`, err);
+    logger.error('chapter.mark_failed.failed', {
+      chapterId,
+      message,
+      err,
+      severity: 'CRITICAL',
+    });
   }
 }
 
@@ -667,25 +676,30 @@ async function loadVoiceAndAnchor(
       ? glossaryResult.value.terms
       : null;
   if (voiceResult.status === 'rejected') {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[per-chapter] readVoiceProfile failed (continuing without voice): ${(voiceResult.reason as Error).message}`,
-    );
+    logger.warn('chapter.voice.read.failed', {
+      pdfSha256,
+      err: voiceResult.reason,
+      fail_open: true,
+    });
   }
   if (anchorResult.status === 'rejected') {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[per-chapter] readAnchorWhitelist failed (continuing without anchors): ${(anchorResult.reason as Error).message}`,
-    );
+    logger.warn('chapter.anchor_whitelist.read.failed', {
+      pdfSha256,
+      err: anchorResult.reason,
+      fail_open: true,
+    });
   }
   // Glossary read failure is COMMON (most tutorials lacked a glossary in
   // pre-Sprint-J ingests; cache-hit fast-path may not have an artifact).
   // Log at debug level only — the success rate is intentionally low.
   if (glossaryResult.status === 'rejected') {
-    // eslint-disable-next-line no-console
-    console.debug(
-      `[per-chapter] readGlossary failed (continuing without glossary): ${(glossaryResult.reason as Error).message}`,
-    );
+    // INFO not warn: glossary cache-miss is common on pre-Sprint-J ingests
+    // and on chapters with no body paragraphs to bootstrap from.
+    logger.info('chapter.glossary.read.failed', {
+      pdfSha256,
+      err: glossaryResult.reason,
+      fail_open: true,
+    });
   }
   return { voiceProfile, anchorWhitelist, glossary };
 }

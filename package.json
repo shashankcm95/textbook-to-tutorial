@@ -19,7 +19,10 @@
     "test": "vitest run",
     "test:phase0": "bash scripts/phase0-gate.sh",
     "test:playwright": "playwright test --config tests/playwright/playwright-setup.ts",
-    "eval:run": "tsx scripts/ab-compare.ts"
+    "eval:run": "tsx scripts/ab-compare.ts",
+    "wipe-dev-db": "tsx scripts/wipe-dev-db.ts",
+    "logs:tail": "tail -f logs/$(date -u +%Y-%m-%d).jsonl 2>/dev/null || echo 'no log file yet — trigger an action first'",
+    "logs:errors": "find logs -name '*.jsonl' -mtime -7 -print0 2>/dev/null | xargs -0 cat 2>/dev/null | jq 'select(.level==\"error\")' || echo 'no logs yet'"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.621.0",

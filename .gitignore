@@ -49,6 +49,11 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Structured-event logs from src/lib/log.ts (per-day JSONL files).
+# Personal-use observability — never committed; cron-prune older than 30d
+# if disk pressure becomes an issue.
+logs/
+
 # Eval harness run artifacts (per docs/eval/HARNESS-DESIGN.md §D4)
 _ab-runs/
 _ux-walks/
