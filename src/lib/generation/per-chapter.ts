@@ -55,6 +55,12 @@ import {
   // before Feature B' shipped have no artifacts → graceful degradation path).
   readVoiceProfile,
   readAnchorWhitelist,
+  // Sprint J — glossary loader. Note: unlike readVoiceProfile /
+  // readAnchorWhitelist which return null on miss, readGlossary THROWS on
+  // miss (legacy contract from PR #20). We wrap it with try/catch in
+  // loadVoiceAndAnchor for fail-open parity.
+  readGlossary,
+  type GlossaryArtifact,
 } from '@/lib/s3-chunks';
 import { validateAnchors, type AnchorWhitelistEntry } from '@/lib/openai/anchor-validator';
 import { detectAdjacentPairViolations } from '@/lib/citations/adjacent-pair-gate';
@@ -173,11 +179,13 @@ export async function generateChapter(
     throw new ChapterGenerationError('no source paragraphs', 'no-source');
   }
 
-  // ── 3.5. Load Feature B' voice + anchor artifacts (fail-open) ──────────
-  // Both may be null for legacy tutorials ingested before Feature B' shipped.
-  // When null, generateNarrativeOnly + scoreFidelity gracefully fall back to
-  // their pre-B' behavior; no rows land in chapter_anchor_violations.
-  const { voiceProfile, anchorWhitelist } = await loadVoiceAndAnchor(tutorial);
+  // ── 3.5. Load Feature B' voice + anchor + (Sprint J) glossary (fail-open) ─
+  // All three may be null for legacy tutorials ingested before the relevant
+  // feature shipped. When null, generateNarrativeOnly + scoreFidelity
+  // gracefully fall back to their pre-injection behavior; no rows land in
+  // chapter_anchor_violations and no glossary section is prepended to the
+  // narrative prompt.
+  const { voiceProfile, anchorWhitelist, glossary } = await loadVoiceAndAnchor(tutorial);
 
   // ── 4. Generate narrative (4o, streaming) ──────────────────────────────
   let narrativeResult;
@@ -191,6 +199,10 @@ export async function generateChapter(
       // narrative prompt. Both args are optional on the generator side.
       voiceProfile: voiceProfile ?? undefined,
       anchorWhitelist: anchorWhitelist ?? undefined,
+      // Sprint J — glossary injection. Null when neither the labeled-
+      // section path nor the NP-fallback produced any terms; the generator
+      // omits the GLOSSARY prompt section in that case.
+      glossary: glossary ?? undefined,
     });
   } catch (err) {
     await markFailed(chapter.id, `narrative: ${(err as Error).message}`);
@@ -621,20 +633,39 @@ async function loadVoiceAndAnchor(
 ): Promise<{
   voiceProfile: VoiceProfile | null;
   anchorWhitelist: AnchorWhitelistEntry[] | null;
+  /**
+   * Sprint J — the persisted GlossaryArtifact, or null on cache miss /
+   * S3-read failure. The narrative prompt builder accepts the artifact's
+   * `terms` array; we pass `glossary.terms` through when non-empty.
+   */
+  glossary: GlossaryArtifact['terms'] | null;
 }> {
   if (!tutorial.sourcePdfSha256) {
-    return { voiceProfile: null, anchorWhitelist: null };
+    return { voiceProfile: null, anchorWhitelist: null, glossary: null };
   }
   const bucket = resolveChunksBucket(tutorial.sourceS3Url);
   const pdfSha256 = tutorial.sourcePdfSha256;
-  const [voiceResult, anchorResult] = await Promise.allSettled([
+  // Sprint J — readGlossary throws on cache miss (S3 404 / NoSuchKey).
+  // We catch inside the Promise.allSettled boundary so the throw is treated
+  // identically to a transient read failure — both fail-open to null.
+  const [voiceResult, anchorResult, glossaryResult] = await Promise.allSettled([
     readVoiceProfile({ bucket, pdfSha256 }),
     readAnchorWhitelist({ bucket, pdfSha256 }),
+    readGlossary(bucket, pdfSha256),
   ]);
   const voiceProfile =
     voiceResult.status === 'fulfilled' ? voiceResult.value : null;
   const anchorWhitelist =
     anchorResult.status === 'fulfilled' ? anchorResult.value : null;
+  // Glossary: a successful read with zero terms is treated as "no glossary"
+  // (null) so the prompt-builder's empty-array no-op stays a no-op. A non-
+  // empty terms array is passed through. The artifact's `schemaVersion` is
+  // dropped at this layer — the prompt-builder consumes only the terms.
+  const glossary =
+    glossaryResult.status === 'fulfilled' &&
+    glossaryResult.value.terms.length > 0
+      ? glossaryResult.value.terms
+      : null;
   if (voiceResult.status === 'rejected') {
     // eslint-disable-next-line no-console
     console.warn(
@@ -647,7 +678,16 @@ async function loadVoiceAndAnchor(
       `[per-chapter] readAnchorWhitelist failed (continuing without anchors): ${(anchorResult.reason as Error).message}`,
     );
   }
-  return { voiceProfile, anchorWhitelist };
+  // Glossary read failure is COMMON (most tutorials lacked a glossary in
+  // pre-Sprint-J ingests; cache-hit fast-path may not have an artifact).
+  // Log at debug level only — the success rate is intentionally low.
+  if (glossaryResult.status === 'rejected') {
+    // eslint-disable-next-line no-console
+    console.debug(
+      `[per-chapter] readGlossary failed (continuing without glossary): ${(glossaryResult.reason as Error).message}`,
+    );
+  }
+  return { voiceProfile, anchorWhitelist, glossary };
 }
 
 async function persistNarrativeOnly(

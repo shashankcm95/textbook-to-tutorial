@@ -50,6 +50,15 @@ export interface NarrativeOnlyArgs {
    * found no load-bearing anchors for this chunk).
    */
   anchorWhitelist?: AnchorWhitelistEntry[];
+  /**
+   * Sprint J — optional canonical glossary to prepend to the system
+   * prompt. No-op when absent or empty (the labeled-section extractor
+   * AND the NP-fallback both produced zero terms, or the tutorial pre-
+   * dates Sprint J entirely). The prompt-builder caps the rendered list
+   * at MAX_GLOSSARY_ENTRIES (currently 80) as defense against pipeline
+   * cardinality drift.
+   */
+  glossary?: import('@/lib/prompts/narrative-only').GlossaryTermEntry[];
 }
 
 export interface NarrativeOnlyResult {
@@ -77,10 +86,15 @@ export async function generateNarrativeOnly(
     onToken,
     voiceProfile,
     anchorWhitelist,
+    glossary,
   } = args;
   if (!isSupportedModel(MODEL)) throw new UnknownModelError(MODEL);
 
-  const systemPrompt = buildNarrativeOnlySystemPrompt({ voiceProfile, anchorWhitelist });
+  const systemPrompt = buildNarrativeOnlySystemPrompt({
+    voiceProfile,
+    anchorWhitelist,
+    glossary,
+  });
   const userPrompt = buildNarrativeOnlyUserPrompt({ chapterTitle, sourceParagraphs });
 
   // DRIFT-test3-032: wrap in shared retry policy. Without this, a single 429

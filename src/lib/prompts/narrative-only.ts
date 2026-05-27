@@ -22,16 +22,46 @@
 //
 //   See `docs/design/feature-b-voice-and-anchor-profile.md` §Component 3 for
 //   the full injection contract + rationale.
+//
+// Sprint J — optional glossary injection (NEW):
+//   `buildNarrativeOnlySystemPrompt({ glossary })` additionally accepts a
+//   list of `{term, definition}` pairs (the artifact persisted to S3 by
+//   either the labeled-glossary extractor OR the NP-fallback bootstrap).
+//   When present, a GLOSSARY section is prepended THIRD (voice → anchors →
+//   glossary → base prompt). The LLM uses these canonical definitions when
+//   the source paragraphs mention a term — keeping cross-chapter terminology
+//   coherent. Absent + empty arrays render no section (byte-identity
+//   invariant preserved).
 
 import type { SourceParagraph } from '@/lib/types';
 import type { VoiceProfile } from '@/lib/ingest/voice-extract';
 import type { AnchorWhitelistEntry } from '@/lib/openai/anchor-validator';
+
+/**
+ * Sprint J — one entry in the glossary section. Matches the shape of
+ * `GlossaryArtifact.terms[*]` from `s3-chunks.ts` so callers can pass the
+ * artifact's `terms` array directly. We declare it locally (not re-import)
+ * to keep `narrative-only.ts` decoupled from the S3 module (this file is
+ * pure string composition and otherwise has zero S3 awareness).
+ */
+export interface GlossaryTermEntry {
+  term: string;
+  definition: string;
+  /** Carried for parity with the on-disk shape; not rendered in the prompt. */
+  sourceParagraphRef?: string;
+}
 
 export interface BuildNarrativeOnlySystemPromptArgs {
   /** Optional. When present, prepend an AUTHOR VOICE PROFILE section. */
   voiceProfile?: VoiceProfile;
   /** Optional. When present AND non-empty, prepend a NAMED ANCHORS section. */
   anchorWhitelist?: AnchorWhitelistEntry[];
+  /**
+   * Sprint J — optional. When present AND non-empty, prepend a GLOSSARY
+   * section with each {term, definition} pair. Renders as a bullet list
+   * AFTER the voice + anchor sections, BEFORE the base prompt.
+   */
+  glossary?: GlossaryTermEntry[];
 }
 
 export function buildNarrativeOnlySystemPrompt(
@@ -39,16 +69,18 @@ export function buildNarrativeOnlySystemPrompt(
 ): string {
   const voiceSection = renderVoiceProfileSection(args?.voiceProfile);
   const anchorsSection = renderAnchorWhitelistSection(args?.anchorWhitelist);
+  const glossarySection = renderGlossarySection(args?.glossary);
   const baseLines = baseSystemPromptLines();
 
   // Compose prepended sections in canonical order: voice FIRST, anchors
-  // SECOND, then the base prompt (which begins with the role line and
-  // ends with the existing FIDELITY + NEGATIVE rules). When neither
-  // section is emitted, return the base prompt byte-for-byte unchanged —
-  // pre-Wave-2 callers must see no diff at all.
+  // SECOND, glossary THIRD (Sprint J), then the base prompt (which begins
+  // with the role line and ends with the existing FIDELITY + NEGATIVE
+  // rules). When NO section is emitted, return the base prompt byte-for-
+  // byte unchanged — pre-injection callers must see no diff at all.
   const prepended: string[] = [];
   if (voiceSection) prepended.push(voiceSection);
   if (anchorsSection) prepended.push(anchorsSection);
+  if (glossarySection) prepended.push(glossarySection);
   if (prepended.length === 0) return baseLines.join('\n');
   return [...prepended, '', ...baseLines].join('\n');
 }
@@ -249,6 +281,11 @@ const MAX_EXAMPLE_PHRASES = 10;
 const MAX_HUMOR_PATTERNS = 5;
 const MAX_PREFERRED_ANALOGIES = 5;
 const MAX_ANCHOR_WHITELIST_ENTRIES = 30;
+// Sprint J — defensive cap for the glossary bullet list. Typical labeled
+// glossaries are 20-50 terms; the NP-fallback caps candidates at 60 and the
+// LLM filter usually reduces further. 80 is a comfortable upper bound that
+// keeps the token cost bounded even if upstream pipelines drift.
+const MAX_GLOSSARY_ENTRIES = 80;
 
 function renderVoiceProfileSection(profile: VoiceProfile | undefined): string | null {
   if (!profile) return null;
@@ -323,6 +360,40 @@ function renderAnchorWhitelistSection(
   // as a final defense against future pipeline cardinality changes.
   whitelist.slice(0, MAX_ANCHOR_WHITELIST_ENTRIES).forEach((a) => {
     lines.push(`    - "${a.term}" (${a.category})`);
+  });
+  return lines.join('\n');
+}
+
+/**
+ * Sprint J — render the GLOSSARY section, or return null when no glossary
+ * was supplied OR the list is empty. Empty array is a meaningful signal:
+ * the upstream pipeline ran but found zero technical terms — emitting the
+ * header with no bullets would just burn tokens.
+ *
+ * Rendering shape mirrors the voice + anchor sections: a header line + a
+ * leading explanatory blurb + a bullet list of `- "term": definition`.
+ * The blurb tells the LLM what to DO with the definitions (use them as
+ * canonical phrasing when the source paragraphs reference a term) — without
+ * it the model can hallucinate that the glossary is just trivia to mention
+ * in passing rather than terminology to align to.
+ */
+function renderGlossarySection(
+  glossary: GlossaryTermEntry[] | undefined,
+): string | null {
+  if (!glossary || glossary.length === 0) return null;
+
+  const lines: string[] = [
+    'GLOSSARY (canonical definitions for cross-chapter terminology):',
+    '  When your source paragraphs mention any of the terms below, use the',
+    '  canonical definition as the authoritative one — phrase your narrative',
+    '  so the reader\'s mental model lines up with these definitions. Do not',
+    '  redefine a term that is already in this list with a contradictory or',
+    '  weaker definition. Terms not in this list may still appear in the',
+    '  narrative; the glossary is a floor, not a ceiling.',
+    '',
+  ];
+  glossary.slice(0, MAX_GLOSSARY_ENTRIES).forEach((g) => {
+    lines.push(`    - "${g.term}": ${g.definition}`);
   });
   return lines.join('\n');
 }

@@ -216,13 +216,23 @@ vi.mock('@/lib/openai/fidelity-check', () => ({
 }));
 
 // S3 helpers — Wave 3A provides readVoiceProfile / readAnchorWhitelist.
+// Sprint J adds readGlossary. Default mock REJECTS to mirror the
+// production cache-miss path (readGlossary throws on S3 404); the
+// per-chapter loader's Promise.allSettled boundary fail-opens to null,
+// keeping pre-Sprint-J tests behaviorally unchanged. Tests that want to
+// drive the glossary-injected path mockResolvedValue with a
+// GlossaryArtifact.
 const readVoiceProfileMock = vi.fn();
 const readAnchorWhitelistMock = vi.fn();
+const readGlossaryMock = vi.fn((..._args: unknown[]) =>
+  Promise.reject(new Error('cache miss')),
+);
 vi.mock('@/lib/s3-chunks', () => ({
   readChunk: vi.fn(),
   resolveChunksBucket: vi.fn(() => 'test-bucket'),
   readVoiceProfile: (args: unknown) => readVoiceProfileMock(args),
   readAnchorWhitelist: (args: unknown) => readAnchorWhitelistMock(args),
+  readGlossary: (...args: unknown[]) => readGlossaryMock(...args),
 }));
 
 // Sprint H Wave 1 (Builder D) — mock the diagram extractor + weaver so the

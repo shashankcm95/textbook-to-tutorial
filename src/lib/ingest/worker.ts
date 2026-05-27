@@ -36,6 +36,7 @@ import { parsePdfBuffer } from '@/lib/pdf/parse';
 import { classifyOutline } from './classifier';
 import { buildChunkManifest } from './chunker';
 import { extractGlossaryFromSections, hasGlossarySections } from './glossary-extract';
+import { runGlossaryNPBootstrap } from './glossary-np-fallback';
 import { extractVoiceProfile } from './voice-extract';
 import { extractAnchorCandidates } from './anchor-prefilter';
 import { scoreAnchorCandidates } from './anchor-scorer';
@@ -57,6 +58,7 @@ import {
   type ChunkArtifact,
   type MetadataArtifact,
   type AnchorWhitelistArtifact,
+  type GlossaryArtifact,
 } from '@/lib/s3-chunks';
 import type { SourceParagraph } from '@/lib/types';
 
@@ -176,20 +178,7 @@ export async function ingestWorker(tutorialId: string): Promise<void> {
         manifest.chunks.map((c) => writeChunkArtifact(bucket, sha256, c)),
       );
 
-      // Glossary side-asset (LLM call); fail-open per glossary-extract.ts
-      const glossary = hasGlossarySections(manifest.glossarySections)
-        ? await extractGlossaryFromSections(manifest.glossarySections)
-        : { schemaVersion: 1 as const, terms: [] };
-      if (glossary.terms.length > 0) {
-        await writeGlossary(bucket, sha256, glossary);
-      }
-
-      // Voice + anchor side-assets (Feature B' Wave 3). Both depend only on
-      // the body paragraphs collected from the chunk manifest; neither
-      // depends on the other → run in parallel. FAIL-OPEN: a failure in
-      // either extractor logs + continues; downstream consumers
-      // (per-chapter generator, fidelity scorer) handle missing artifacts
-      // by falling back to v3 prompt behavior.
+      // Body-paragraph flatten (used by glossary fallback + voice + anchor).
       //
       // Sprint D Phase 3 — chapter-firsts plumbing: each chunk's paragraphs
       // are tagged with `chapterParagraphIdx` (0-based position WITHIN the
@@ -207,6 +196,47 @@ export async function ingestWorker(tutorialId: string): Promise<void> {
             chapterParagraphIdx,
           })),
         );
+
+      // Glossary side-asset (LLM call); fail-open per glossary-extract.ts.
+      //
+      // Sprint J — frequent-NP fallback path. When the chunker did not
+      // detect any labeled glossary outline section (true for CTCI, most
+      // O'Reilly titles, etc.), we run a heuristic+LLM bootstrap over the
+      // body paragraphs and persist the result as the SAME GlossaryArtifact
+      // shape. Downstream consumers (per-chapter prompt injection) can't
+      // tell which path produced the artifact.
+      //
+      // Fail-open: the NP bootstrap returns `{terms: []}` on any error and
+      // logs internally, mirroring `extractGlossaryFromSections`.
+      let glossary: GlossaryArtifact;
+      if (hasGlossarySections(manifest.glossarySections)) {
+        glossary = await extractGlossaryFromSections(manifest.glossarySections);
+      } else {
+        // Sprint J fallback. Wrapped in try/catch as defense-in-depth even
+        // though the orchestrator itself is fail-open — any unexpected
+        // throw (programmer error, type-narrowing surprise) must not block
+        // ingest.
+        try {
+          glossary = await runGlossaryNPBootstrap(bodyParagraphs);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[ingestWorker] glossary NP-fallback failed for ${sha256} (fail-open):`,
+            (err as Error).message,
+          );
+          glossary = { schemaVersion: 1, terms: [] };
+        }
+      }
+      if (glossary.terms.length > 0) {
+        await writeGlossary(bucket, sha256, glossary);
+      }
+
+      // Voice + anchor side-assets (Feature B' Wave 3). Both depend only on
+      // the body paragraphs collected from the chunk manifest; neither
+      // depends on the other → run in parallel. FAIL-OPEN: a failure in
+      // either extractor logs + continues; downstream consumers
+      // (per-chapter generator, fidelity scorer) handle missing artifacts
+      // by falling back to v3 prompt behavior.
       const glossaryTermStrings: string[] = glossary.terms.map((t) => t.term);
 
       await Promise.all([

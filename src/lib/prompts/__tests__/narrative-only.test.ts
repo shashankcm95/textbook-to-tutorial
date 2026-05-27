@@ -25,6 +25,7 @@ import {
   buildNarrativeOnlySystemPrompt,
   buildNarrativeOnlyUserPrompt,
   type BuildNarrativeOnlySystemPromptArgs,
+  type GlossaryTermEntry,
 } from '../narrative-only';
 import type { VoiceProfile } from '@/lib/ingest/voice-extract';
 import type { AnchorWhitelistEntry } from '@/lib/openai/anchor-validator';
@@ -139,6 +140,12 @@ describe('buildNarrativeOnlySystemPrompt — no-args / no-op path', () => {
     const noArgs = buildNarrativeOnlySystemPrompt();
     const emptyAnchors = buildNarrativeOnlySystemPrompt({ anchorWhitelist: [] });
     expect(emptyAnchors).toBe(noArgs);
+  });
+
+  it('treats empty glossary + absent voice + absent anchors as no-op (Sprint J)', () => {
+    const noArgs = buildNarrativeOnlySystemPrompt();
+    const emptyGlossary = buildNarrativeOnlySystemPrompt({ glossary: [] });
+    expect(emptyGlossary).toBe(noArgs);
   });
 });
 
@@ -378,6 +385,112 @@ describe('renderers — Wave-2 review HIGH 2B-H2 (defensive size caps)', () => {
     expect(prompt).toContain('anchor-term-30');
     expect(prompt).not.toContain('anchor-term-31');
     expect(prompt).not.toContain('anchor-term-45');
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Sprint J — glossary injection
+// ───────────────────────────────────────────────────────────────────────────
+
+function makeGlossaryEntry(
+  term: string,
+  definition: string,
+  sourceParagraphRef: string = 'page1:paragraph0',
+): GlossaryTermEntry {
+  return { term, definition, sourceParagraphRef };
+}
+
+describe('buildNarrativeOnlySystemPrompt — glossary injection (Sprint J)', () => {
+  it('injects the GLOSSARY section with each term + definition rendered as a bullet', () => {
+    const glossary: GlossaryTermEntry[] = [
+      makeGlossaryEntry('Hash Table', 'A keyed data structure indexed via a hash function.'),
+      makeGlossaryEntry('Bloom Filter', 'A probabilistic set-membership data structure.'),
+    ];
+    const prompt = buildNarrativeOnlySystemPrompt({ glossary });
+
+    expect(prompt).toContain('GLOSSARY');
+    expect(prompt).toContain('canonical definitions');
+    for (const g of glossary) {
+      expect(prompt).toContain(`"${g.term}": ${g.definition}`);
+    }
+
+    // No voice / anchor section absent.
+    expect(prompt).not.toContain('AUTHOR VOICE PROFILE');
+    expect(prompt).not.toContain('NAMED ANCHORS');
+
+    expectExistingRulesPresent(prompt);
+  });
+
+  it('orders the glossary section BEFORE the FIDELITY RULES block', () => {
+    const prompt = buildNarrativeOnlySystemPrompt({
+      glossary: [makeGlossaryEntry('CAP theorem', 'A distributed-systems consistency tradeoff.')],
+    });
+    const glossaryIdx = prompt.indexOf('GLOSSARY');
+    const fidelityIdx = prompt.indexOf('FIDELITY RULES');
+    expect(glossaryIdx).toBeGreaterThanOrEqual(0);
+    expect(fidelityIdx).toBeGreaterThanOrEqual(0);
+    expect(glossaryIdx).toBeLessThan(fidelityIdx);
+  });
+
+  it('emits no GLOSSARY section when the list is empty', () => {
+    const prompt = buildNarrativeOnlySystemPrompt({ glossary: [] });
+    expect(prompt).not.toContain('GLOSSARY');
+    // Equals the no-args (no-op) prompt byte-for-byte.
+    expect(prompt).toBe(buildNarrativeOnlySystemPrompt());
+  });
+
+  it('caps glossary entries at MAX_GLOSSARY_ENTRIES (defends against pipeline drift)', () => {
+    const glossary: GlossaryTermEntry[] = Array.from({ length: 120 }, (_, i) =>
+      makeGlossaryEntry(`unique-gloss-term-${i + 1}`, `definition ${i + 1}`),
+    );
+    const prompt = buildNarrativeOnlySystemPrompt({ glossary });
+    // First 80 must appear.
+    expect(prompt).toContain('unique-gloss-term-1');
+    expect(prompt).toContain('unique-gloss-term-80');
+    // 81 onward must NOT appear.
+    expect(prompt).not.toContain('unique-gloss-term-81');
+    expect(prompt).not.toContain('unique-gloss-term-100');
+  });
+});
+
+describe('buildNarrativeOnlySystemPrompt — voice + anchors + glossary (full Sprint J ordering)', () => {
+  it('emits voice FIRST, anchors SECOND, glossary THIRD, base prompt LAST', () => {
+    const voiceProfile = makeVoiceProfile();
+    const anchors = [makeAnchor('Chaos Monkey', 'named-system')];
+    const glossary = [
+      makeGlossaryEntry('Replication', 'The act of keeping a copy of data on multiple nodes.'),
+    ];
+    const prompt = buildNarrativeOnlySystemPrompt({
+      voiceProfile,
+      anchorWhitelist: anchors,
+      glossary,
+    });
+
+    const voiceIdx = prompt.indexOf('AUTHOR VOICE PROFILE');
+    const anchorsIdx = prompt.indexOf('NAMED ANCHORS');
+    const glossaryIdx = prompt.indexOf('GLOSSARY');
+    const fidelityIdx = prompt.indexOf('FIDELITY RULES');
+
+    expect(voiceIdx).toBeGreaterThanOrEqual(0);
+    expect(anchorsIdx).toBeGreaterThanOrEqual(0);
+    expect(glossaryIdx).toBeGreaterThanOrEqual(0);
+    expect(fidelityIdx).toBeGreaterThanOrEqual(0);
+    expect(voiceIdx).toBeLessThan(anchorsIdx);
+    expect(anchorsIdx).toBeLessThan(glossaryIdx);
+    expect(glossaryIdx).toBeLessThan(fidelityIdx);
+
+    expectExistingRulesPresent(prompt);
+  });
+
+  it('preserves the role line ("You are a tutorial-writer...") AFTER the prepended sections', () => {
+    const prompt = buildNarrativeOnlySystemPrompt({
+      voiceProfile: makeVoiceProfile(),
+      anchorWhitelist: [makeAnchor('RAID')],
+      glossary: [makeGlossaryEntry('RAID', 'A redundant array of inexpensive disks.')],
+    });
+    const roleIdx = prompt.indexOf('You are a tutorial-writer');
+    const glossaryIdx = prompt.indexOf('GLOSSARY');
+    expect(roleIdx).toBeGreaterThan(glossaryIdx);
   });
 });
 
