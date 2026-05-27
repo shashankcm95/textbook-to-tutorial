@@ -15,6 +15,7 @@ import {
   validateS3UrlShape,
   compareLibraryRows,
   deriveFallbackTitle,
+  coerceTimestampToMs,
 } from '../library';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -275,5 +276,73 @@ describe('deriveFallbackTitle', () => {
     // %2 is invalid (% must be followed by 2 hex chars); decodeURIComponent
     // throws — we should fall back to the un-decoded form, not crash.
     expect(deriveFallbackTitle('s3://b/Bad%2.pdf')).toBe('Bad%2');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// coerceTimestampToMs
+//
+// Regression for the "Added NaN-NaN-NaN" bug observed in localhost 2026-05-27:
+// `tutorials.created_at` is declared `integer mode='timestamp'` but defaults
+// to SQLite's `CURRENT_TIMESTAMP` which actually stores TEXT like
+// '2026-05-23 20:12:13'. Every existing row in the dev DB has `typeof = text`.
+// Drizzle's coercion silently produced NaN; the card rendered NaN-NaN-NaN.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('coerceTimestampToMs', () => {
+  it('parses SQLite CURRENT_TIMESTAMP TEXT format as UTC', () => {
+    const ms = coerceTimestampToMs('2026-05-23 20:12:13');
+    expect(ms).not.toBeNull();
+    // '2026-05-23T20:12:13Z' in ms — verified once, then compared exactly so
+    // future date-engine quirks surface.
+    expect(ms).toBe(Date.UTC(2026, 4, 23, 20, 12, 13));
+  });
+
+  it('accepts a Date instance', () => {
+    const d = new Date('2026-01-01T00:00:00Z');
+    expect(coerceTimestampToMs(d)).toBe(d.getTime());
+  });
+
+  it('treats a number under 1e12 as unix seconds and converts to ms', () => {
+    // Unix seconds for 2026-01-01 ≈ 1.77e9
+    const secs = 1_770_000_000;
+    expect(coerceTimestampToMs(secs)).toBe(secs * 1000);
+  });
+
+  it('treats a number above 1e12 as ms already', () => {
+    const ms = 1_770_000_000_000;
+    expect(coerceTimestampToMs(ms)).toBe(ms);
+  });
+
+  it('returns null for null/undefined', () => {
+    expect(coerceTimestampToMs(null)).toBeNull();
+    expect(coerceTimestampToMs(undefined)).toBeNull();
+  });
+
+  it('returns null for unparseable strings', () => {
+    expect(coerceTimestampToMs('not a date')).toBeNull();
+    expect(coerceTimestampToMs('')).toBeNull();
+    expect(coerceTimestampToMs('   ')).toBeNull();
+  });
+
+  it('returns null for non-finite numbers', () => {
+    expect(coerceTimestampToMs(Number.NaN)).toBeNull();
+    expect(coerceTimestampToMs(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(coerceTimestampToMs(-1)).toBeNull();
+  });
+
+  it('returns null for unsupported types', () => {
+    expect(coerceTimestampToMs({})).toBeNull();
+    expect(coerceTimestampToMs([])).toBeNull();
+    expect(coerceTimestampToMs(true)).toBeNull();
+  });
+
+  it('returns null for an Invalid Date instance', () => {
+    expect(coerceTimestampToMs(new Date('not a date'))).toBeNull();
+  });
+
+  it('handles an ISO 8601 string with explicit timezone', () => {
+    const iso = '2026-05-23T20:12:13Z';
+    expect(coerceTimestampToMs(iso)).toBe(Date.parse(iso));
   });
 });

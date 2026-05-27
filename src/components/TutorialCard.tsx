@@ -153,16 +153,21 @@ export function TutorialCard({ row }: TutorialCardProps) {
  * Tiny relative-time formatter — no Intl.RelativeTimeFormat dep on the
  * critical path, no fancy library. Steps: <1m / <1h / <1d / <7d / date.
  *
- * Pure. Tests cover it via deriveFallbackTitle + computeAggregateStatus;
- * a dedicated test is overkill for this surface area.
+ * Robust against bad input (NaN, negative, non-finite, future) — returns
+ * 'unknown' rather than 'NaN-NaN-NaN'. The library loader already coerces
+ * timestamps to clean numbers via `coerceTimestampToMs`, but the card
+ * is a leaf component and shouldn't trust its input shape.
  */
 function formatRelative(ms: number): string {
-  const deltaSec = Math.max(0, (Date.now() - ms) / 1000);
+  if (!Number.isFinite(ms) || ms <= 0) return 'unknown';
+  const deltaSec = (Date.now() - ms) / 1000;
+  if (deltaSec < 0) return 'just now'; // clock skew or future-dated row
   if (deltaSec < 60) return 'just now';
   if (deltaSec < 60 * 60) return `${Math.round(deltaSec / 60)}m ago`;
   if (deltaSec < 60 * 60 * 24) return `${Math.round(deltaSec / 3600)}h ago`;
   if (deltaSec < 60 * 60 * 24 * 7) return `${Math.round(deltaSec / 86_400)}d ago`;
   const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return 'unknown';
   // Locale-neutral compact format: YYYY-MM-DD
   const pad = (n: number) => n.toString().padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;

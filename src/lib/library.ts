@@ -162,6 +162,62 @@ export function validateS3UrlShape(input: string): S3ValidationResult {
 }
 
 /**
+ * Coerce a Drizzle-returned timestamp to milliseconds since epoch, or
+ * `null` if the value can't be interpreted.
+ *
+ * The `tutorials.created_at` and `chapters.viewed_at` columns are
+ * declared as `integer('created_at', { mode: 'timestamp' })` in the
+ * schema, which means Drizzle WOULD return a `Date` object — except
+ * that `created_at` defaults to SQLite's `CURRENT_TIMESTAMP`, which
+ * stores TEXT like `'2026-05-23 20:12:13'`, not an integer. Verified
+ * 2026-05-27 in this DB: every existing row has `typeof(created_at) =
+ * 'text'`. This means Drizzle's coercion path (which assumes integer
+ * seconds) silently produces `NaN` on those rows, surfacing as
+ * "Added NaN-NaN-NaN" in the library cards.
+ *
+ * Rather than migrate the schema (would touch every code path that
+ * reads created_at — out of scope for the library card), this helper
+ * accepts any of the shapes that can come back and returns clean ms.
+ *
+ * Order of checks:
+ *   1. null/undefined → null
+ *   2. Date instance → getTime()
+ *   3. number → assume seconds (Drizzle's mode='timestamp' convention),
+ *      multiply by 1000. Reject NaN / negatives / unrealistically-large.
+ *   4. string → try `Date.parse` after normalizing the SQLite TEXT
+ *      format ('2026-05-23 20:12:13' → '2026-05-23T20:12:13Z' interpreted
+ *      as UTC). Fall back to null if unparseable.
+ */
+export function coerceTimestampToMs(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) {
+    const t = value.getTime();
+    return Number.isFinite(t) ? t : null;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value < 0) return null;
+    // Heuristic: seconds vs ms. SQLite unixepoch() returns seconds; values
+    // before year 2286 fit in 10 digits. If the value is too large to be
+    // seconds-since-epoch, assume it's already ms.
+    const probablyMs = value > 1e12;
+    return probablyMs ? value : value * 1000;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) return null;
+    // SQLite's 'YYYY-MM-DD HH:MM:SS' format — convert to ISO 8601 UTC.
+    // The space-separator + lack of timezone otherwise parses
+    // inconsistently across V8 / WebKit / Firefox.
+    const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(trimmed)
+      ? trimmed.replace(' ', 'T') + 'Z'
+      : trimmed;
+    const ms = Date.parse(iso);
+    return Number.isFinite(ms) ? ms : null;
+  }
+  return null;
+}
+
+/**
  * Sort comparator: most-recently-viewed first, then most-recently-created
  * first as tiebreak. Pure; used both at query level (ORDER BY) and as a
  * defensive client-side re-sort if the caller hands an unordered array.
@@ -271,14 +327,13 @@ export async function loadLibrary(
     totalChapters: r.totalChapters,
     completeChapters: Number(r.completeChaptersRaw ?? 0),
     maxUnlockedChapterIdx: r.maxUnlockedChapterIdx,
-    lastViewedAtMs:
-      r.lastViewedAtSecondsRaw != null
-        ? Number(r.lastViewedAtSecondsRaw) * 1000
-        : null,
-    createdAtMs:
-      r.createdAt instanceof Date
-        ? r.createdAt.getTime()
-        : Number(r.createdAt ?? 0) * 1000,
+    // Defensive coercion — see coerceTimestampToMs docstring for the
+    // schema-vs-default mismatch this is working around.
+    lastViewedAtMs: coerceTimestampToMs(r.lastViewedAtSecondsRaw),
+    // createdAt MUST coerce; the column is non-null in schema. If the
+    // helper returns null (corrupted text), surface as 0 (epoch) so the
+    // card still renders a stable string rather than 'Invalid Date'.
+    createdAtMs: coerceTimestampToMs(r.createdAt) ?? 0,
   }));
 }
 
