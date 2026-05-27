@@ -21,6 +21,7 @@
 
 import React from 'react';
 import { parseDiagramBlock } from '@/lib/diagrams/parse';
+import { computeInstanceId } from '@/lib/diagrams/instance-id';
 import { ComparisonTable } from './ComparisonTable';
 import { DefinitionList } from './DefinitionList';
 import DiagramFlow from './DiagramFlow';
@@ -36,17 +37,23 @@ export function DiagramBlock({ rawJSON }: { rawJSON: string }) {
   }
 
   const { payload } = result;
+  // Sprint G (2026-05-27): compute a deterministic per-payload instance ID
+  // so SVG primitives can scope their `<marker id="...">` definitions and
+  // avoid duplicate-ID collisions when two diagrams of the SAME kind render
+  // on one page. Pure primitives (ComparisonTable, DefinitionList) don't
+  // need it — they have no SVG marker defs.
+  const instanceId = computeInstanceId(payload);
   switch (payload.kind) {
     case 'ComparisonTable':
       return <ComparisonTable payload={payload} />;
     case 'DefinitionList':
       return <DefinitionList payload={payload} />;
     case 'DiagramFlow':
-      return <DiagramFlow payload={payload} />;
+      return <DiagramFlow payload={payload} instanceId={instanceId} />;
     case 'StateTransitionDiagram':
-      return <StateTransitionDiagram payload={payload} />;
+      return <StateTransitionDiagram payload={payload} instanceId={instanceId} />;
     case 'SequenceDiagram':
-      return <SequenceDiagram payload={payload} />;
+      return <SequenceDiagram payload={payload} instanceId={instanceId} />;
     case 'DecisionTree':
       return <DecisionTree payload={payload} />;
     default: {

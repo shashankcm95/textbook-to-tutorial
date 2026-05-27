@@ -25,6 +25,7 @@
 
 import React from 'react';
 import type { DiagramFlowPayload } from '@/lib/diagrams/schema';
+import { markerId } from '@/lib/diagrams/instance-id';
 
 // ── Geometry constants — design-pixel units; the viewBox carries them. ──
 const NODE_W = 128;
@@ -48,9 +49,23 @@ function buildAriaLabel(payload: DiagramFlowPayload): string {
   return `${heading}: ${stepCount} step${stepCount === 1 ? '' : 's'} from start to end — ${labels.join(' → ')}.`;
 }
 
-export default function DiagramFlow({ payload }: { payload: DiagramFlowPayload }) {
+export default function DiagramFlow({
+  payload,
+  instanceId,
+}: {
+  payload: DiagramFlowPayload;
+  /**
+   * Optional Sprint G (2026-05-27) — per-instance suffix on SVG marker IDs.
+   * When DiagramBlock supplies this, the `<marker id="...">` definition is
+   * scoped per-payload so two DiagramFlow renders on one page no longer
+   * share `cb-arrow-flow` as their marker id. Omitted callers (e.g. the
+   * diagram-gallery dev route with canned fixtures) render unchanged.
+   */
+  instanceId?: string;
+}) {
   const { title, direction = 'LR', nodes, edges } = payload;
   const isLR = direction === 'LR';
+  const arrowMarkerId = markerId('cb-arrow-flow', instanceId);
   const pitch = isLR ? PITCH_X : PITCH_Y;
 
   // 1. Place nodes on the active axis (declaration order = layout order).
@@ -94,7 +109,7 @@ export default function DiagramFlow({ payload }: { payload: DiagramFlowPayload }
             multiple diagrams render on one page.
           */}
           <marker
-            id="cb-arrow-flow"
+            id={arrowMarkerId}
             viewBox="0 0 10 10"
             refX="9"
             refY="5"
@@ -125,7 +140,7 @@ export default function DiagramFlow({ payload }: { payload: DiagramFlowPayload }
               y2={y2}
               stroke="hsl(var(--ink-muted))"
               strokeWidth={1.5}
-              markerEnd="url(#cb-arrow-flow)"
+              markerEnd={`url(#${arrowMarkerId})`}
             />
           );
         })}

@@ -41,6 +41,7 @@
 
 import React from 'react';
 import type { SequenceDiagramPayload } from '@/lib/diagrams/schema';
+import { markerId } from '@/lib/diagrams/instance-id';
 
 // ── Geometry constants — design-pixel units; the viewBox carries them. ──
 const LIFELINE_X_0 = 80;     // x-coord of the FIRST lifeline (also = left pad)
@@ -64,8 +65,17 @@ function buildAriaLabel(payload: SequenceDiagramPayload): string {
   return `${heading}: ${messageCount} message${messageCount === 1 ? '' : 's'} between ${actorCount} actor${actorCount === 1 ? '' : 's'} (${payload.actors.join(', ')}).`;
 }
 
-export default function SequenceDiagram({ payload }: { payload: SequenceDiagramPayload }) {
+export default function SequenceDiagram({
+  payload,
+  instanceId,
+}: {
+  payload: SequenceDiagramPayload;
+  /** Sprint G (2026-05-27) — see DiagramFlow.tsx for rationale. */
+  instanceId?: string;
+}) {
   const { title, actors, messages } = payload;
+  const callMarkerId = markerId('cb-arrow-seq-call', instanceId);
+  const asyncMarkerId = markerId('cb-arrow-seq-async', instanceId);
 
   // 1. Actor name → index → lifeline x-coord. Index lookup is O(actors.length);
   //    actors caps at 6 so a plain Map suffices.
@@ -127,7 +137,7 @@ export default function SequenceDiagram({ payload }: { payload: SequenceDiagramP
               Standard UML async-message convention.
           */}
           <marker
-            id="cb-arrow-seq-call"
+            id={callMarkerId}
             viewBox="0 0 10 10"
             refX="9"
             refY="5"
@@ -138,7 +148,7 @@ export default function SequenceDiagram({ payload }: { payload: SequenceDiagramP
             <path d="M 0 0 L 10 5 L 0 10 z" fill="hsl(var(--ink))" />
           </marker>
           <marker
-            id="cb-arrow-seq-async"
+            id={asyncMarkerId}
             viewBox="0 0 10 10"
             refX="9"
             refY="5"
@@ -215,7 +225,7 @@ export default function SequenceDiagram({ payload }: { payload: SequenceDiagramP
 
           const stroke = isReturn ? 'hsl(var(--ink-muted))' : 'hsl(var(--ink))';
           const dashArray = isReturn ? '6 4' : undefined;
-          const markerId = isAsync ? 'cb-arrow-seq-async' : 'cb-arrow-seq-call';
+          const arrowMarkerId = isAsync ? asyncMarkerId : callMarkerId;
 
           if (fromIdx === toIdx) {
             // Self-message: right-loop. Cubic Bézier exits the lifeline,
@@ -237,7 +247,7 @@ export default function SequenceDiagram({ payload }: { payload: SequenceDiagramP
                   stroke={stroke}
                   strokeWidth={1.5}
                   strokeDasharray={dashArray}
-                  markerEnd={`url(#${markerId})`}
+                  markerEnd={`url(#${arrowMarkerId})`}
                 />
                 <text
                   x={xMid + 6}
@@ -274,7 +284,7 @@ export default function SequenceDiagram({ payload }: { payload: SequenceDiagramP
                 stroke={stroke}
                 strokeWidth={1.5}
                 strokeDasharray={dashArray}
-                markerEnd={`url(#${markerId})`}
+                markerEnd={`url(#${arrowMarkerId})`}
               />
               {/* Background rect so the label doesn't strike through the
                   lifelines underneath. */}

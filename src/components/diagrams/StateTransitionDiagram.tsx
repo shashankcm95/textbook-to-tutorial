@@ -54,6 +54,7 @@
 
 import React from 'react';
 import type { StateTransitionDiagramPayload } from '@/lib/diagrams/schema';
+import { markerId } from '@/lib/diagrams/instance-id';
 
 // ---------------------------------------------------------------------------
 // Geometry constants — design pixels, scaled by SVG viewBox.
@@ -130,10 +131,14 @@ function describe(payload: StateTransitionDiagramPayload): string {
 
 export default function StateTransitionDiagram({
   payload,
+  instanceId,
 }: {
   payload: StateTransitionDiagramPayload;
+  /** Sprint G (2026-05-27) — see DiagramFlow.tsx for rationale. */
+  instanceId?: string;
 }) {
   const { title, states, transitions } = payload;
+  const stateMarkerId = markerId('cb-arrow-state', instanceId);
 
   // Circle radius — at least 120; grows with state count so circles + labels
   // don't collide. The 24px slack on top of NODE_W/2 + NODE_W/2 accounts for
@@ -184,7 +189,7 @@ export default function StateTransitionDiagram({
         <defs>
           {/* Arrowhead — solid filled triangle in current text color. */}
           <marker
-            id="cb-arrow-state"
+            id={stateMarkerId}
             viewBox="0 0 10 10"
             refX="9"
             refY="5"
@@ -199,7 +204,7 @@ export default function StateTransitionDiagram({
         {/* 1. Transitions painted first so state circles paint on top of edge ends. */}
         {routed.map((t) => {
           if (t.from === t.to) {
-            return <SelfLoop key={`${t.from}->${t.to}`} from={positions.get(t.from)!} trigger={t.trigger} />;
+            return <SelfLoop key={`${t.from}->${t.to}`} from={positions.get(t.from)!} trigger={t.trigger} markerId={stateMarkerId} />;
           }
           const isBidir = routedSet.has(pairKey(t.to, t.from));
           return (
@@ -209,13 +214,14 @@ export default function StateTransitionDiagram({
               to={positions.get(t.to)!}
               trigger={t.trigger}
               bidirectional={isBidir}
+              markerId={stateMarkerId}
             />
           );
         })}
 
         {/* 2. State nodes (circles, terminal double-ring, initial-marker). */}
         {Array.from(positions.values()).map(({ x, y, angle, state }) => (
-          <StateNode key={state.id} x={x} y={y} angle={angle} label={state.label} initial={state.initial} terminal={state.terminal} />
+          <StateNode key={state.id} x={x} y={y} angle={angle} label={state.label} initial={state.initial} terminal={state.terminal} markerId={stateMarkerId} />
         ))}
       </svg>
     </figure>
@@ -233,6 +239,7 @@ function StateNode({
   label,
   initial,
   terminal,
+  markerId,
 }: {
   x: number;
   y: number;
@@ -240,6 +247,8 @@ function StateNode({
   label: string;
   initial?: boolean;
   terminal?: boolean;
+  /** Sprint G — scoped arrowhead marker id. */
+  markerId: string;
 }) {
   // Initial-marker: small dot outside the perimeter on the radially-outward
   // direction (same angle as the state-to-center vector, away from center).
@@ -263,7 +272,7 @@ function StateNode({
             y2={perimY}
             stroke="currentColor"
             strokeWidth={1.5}
-            markerEnd="url(#cb-arrow-state)"
+            markerEnd={`url(#${markerId})`}
           />
           <circle cx={initialX} cy={initialY} r={INITIAL_DOT_R} fill="hsl(var(--brand))" />
         </>
@@ -309,9 +318,12 @@ function StateNode({
 function SelfLoop({
   from,
   trigger,
+  markerId,
 }: {
   from: { x: number; y: number; angle: number };
   trigger?: string;
+  /** Sprint G — scoped arrowhead marker id. */
+  markerId: string;
 }) {
   // We anchor the loop on the radially-outward side of the state circle.
   // The two perimeter anchor points sit ±15° from the radial-outward axis;
@@ -346,7 +358,7 @@ function SelfLoop({
         fill="none"
         stroke="currentColor"
         strokeWidth={1.5}
-        markerEnd="url(#cb-arrow-state)"
+        markerEnd={`url(#${markerId})`}
       />
       {trigger ? <EdgeLabel x={lx} y={ly} text={trigger} /> : null}
     </g>
@@ -363,11 +375,14 @@ function PairTransition({
   to,
   trigger,
   bidirectional,
+  markerId,
 }: {
   from: { x: number; y: number };
   to: { x: number; y: number };
   trigger?: string;
   bidirectional: boolean;
+  /** Sprint G — scoped arrowhead marker id. */
+  markerId: string;
 }) {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
@@ -420,7 +435,7 @@ function PairTransition({
         y2={ey}
         stroke="currentColor"
         strokeWidth={1.5}
-        markerEnd="url(#cb-arrow-state)"
+        markerEnd={`url(#${markerId})`}
       />
       {trigger ? <EdgeLabel x={lx} y={ly} text={trigger} /> : null}
     </g>
