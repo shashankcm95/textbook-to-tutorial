@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 /**
@@ -10,10 +10,20 @@ import { useRouter } from 'next/navigation';
  * Submit flow:
  *   1. Read __csrf cookie value via document.cookie
  *   2. POST {s3Url} to /api/ingest with X-CSRF-Token header
- *   3. On 202: redirect to /tutorials/[id]
+ *   3. On 202: fire `onSuccess` (if provided) THEN redirect to /tutorials/[id]
  *   4. On error: surface message + keep form intact for retry
+ *
+ * `onSuccess` lets a wrapping modal (see AddTutorialSheet) close itself
+ * during the navigation so the user doesn't see a stale sheet flicker
+ * over the destination page.
  */
-export function HomeIngestForm({ prefillUrl }: { prefillUrl: string }) {
+interface HomeIngestFormProps {
+  prefillUrl: string;
+  /** Optional. Fires after a 202 response, just before router.push. */
+  onSuccess?: () => void;
+}
+
+export function HomeIngestForm({ prefillUrl, onSuccess }: HomeIngestFormProps) {
   const router = useRouter();
   // Sprint-Bv2 redesign: start empty (was pre-filled with a dev-account
   // S3 URL which leaked into the brand surface). The `prefillUrl` is
@@ -57,6 +67,10 @@ export function HomeIngestForm({ prefillUrl }: { prefillUrl: string }) {
         // POST /api/ingest returns { id, status } — see route.ts:171.
         const data = (await res.json()) as { id?: string };
         if (data.id) {
+          // Notify the wrapper (modal close) BEFORE pushing — otherwise
+          // the wrapper closes after navigation has already torn down
+          // the tree, which can flash the empty form for a frame.
+          onSuccess?.();
           router.push(`/tutorials/${data.id}`);
           return;
         }
